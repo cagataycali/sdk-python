@@ -99,6 +99,7 @@ See the speech_to_speech function docstring for complete parameter documentation
 """
 
 import asyncio
+import base64
 import logging
 import sys
 import threading
@@ -112,15 +113,15 @@ import pyaudio
 from strands import tool
 
 
-from strands.experimental.bidirectional_streaming.agent.agent import BidirectionalAgent
+from strands.experimental.bidirectional_streaming.agent.agent import BidiAgent
 from strands.experimental.bidirectional_streaming.models.gemini_live import (
-    GeminiLiveBidirectionalModel,
+    BidiGeminiLiveModel,
 )
 from strands.experimental.bidirectional_streaming.models.novasonic import (
-    NovaSonicBidirectionalModel,
+    BidiNovaSonicModel,
 )
 from strands.experimental.bidirectional_streaming.models.openai import (
-    OpenAIRealtimeBidirectionalModel,
+    BidiOpenAIRealtimeModel,
 )
 
 logger = logging.getLogger(__name__)
@@ -143,22 +144,28 @@ class SpeechSession:
     def __init__(
         self,
         session_id: str,
-        agent: BidirectionalAgent,
+        agent: BidiAgent,
         audio_input_enabled: bool = True,
         audio_output_enabled: bool = True,
+        input_sample_rate: int = 16000,
+        output_sample_rate: int = 16000,
     ):
         """Initialize speech session.
 
         Args:
             session_id: Unique session identifier
-            agent: BidirectionalAgent instance
+            agent: BidiAgent instance
             audio_input_enabled: Whether to capture microphone input
             audio_output_enabled: Whether to play audio output
+            input_sample_rate: Sample rate for microphone input
+            output_sample_rate: Sample rate for audio output
         """
         self.session_id = session_id
         self.agent = agent
         self.audio_input_enabled = audio_input_enabled
         self.audio_output_enabled = audio_output_enabled
+        self.input_sample_rate = input_sample_rate
+        self.output_sample_rate = output_sample_rate
 
         self.active = False
         self.thread = None
@@ -227,7 +234,7 @@ class SpeechSession:
             logger.error(f"Async session error: {e}\n{traceback.format_exc()}")
         finally:
             try:
-                await self.agent.end()
+                await self.agent.stop()
             except Exception as e:
                 logger.error(f"Error ending agent: {e}")
 
@@ -242,7 +249,7 @@ class SpeechSession:
                 channels=1,
                 format=pyaudio.paInt16,
                 output=True,
-                rate=OUTPUT_SAMPLE_RATE,
+                rate=self.output_sample_rate,
                 frames_per_buffer=OUTPUT_CHUNK_SIZE,
             )
 
@@ -262,21 +269,24 @@ class SpeechSession:
                             await asyncio.sleep(0.05)
                             continue
 
-                        # Get next audio data
+                        # Get next audio data (base64 string)
                         audio_data = await asyncio.wait_for(
                             self.audio_output_queue.get(), timeout=0.1
                         )
 
                         if audio_data and self.active:
+                            # Audio data is base64 string - decode to bytes
+                            audio_bytes = base64.b64decode(audio_data)
+                            
                             # Write in chunks for responsiveness
                             chunk_size = OUTPUT_CHUNK_SIZE
-                            for i in range(0, len(audio_data), chunk_size):
+                            for i in range(0, len(audio_bytes), chunk_size):
                                 # Check for interruption before each chunk
                                 if self.interrupted or not self.active:
                                     break
 
-                                end = min(i + chunk_size, len(audio_data))
-                                chunk = audio_data[i:end]
+                                end = min(i + chunk_size, len(audio_bytes))
+                                chunk = audio_bytes[i:end]
                                 speaker.write(chunk)
                                 await asyncio.sleep(0.001)
 
@@ -308,7 +318,7 @@ class SpeechSession:
                 format=pyaudio.paInt16,
                 frames_per_buffer=INPUT_CHUNK_SIZE,
                 input=True,
-                rate=INPUT_SAMPLE_RATE,
+                rate=self.input_sample_rate,
             )
 
             try:
@@ -334,27 +344,31 @@ class SpeechSession:
     async def _receive_from_agent(self) -> None:
         """Receive events from agent - matches test pattern."""
         try:
+            # Import TypedEvent classes
+            from strands.experimental.bidirectional_streaming.types.events import (
+                BidiAudioStreamEvent,
+                BidiTranscriptStreamEvent,
+                BidiInterruptionEvent,
+            )
+            
             async for event in self.agent.receive():
                 if not self.active:
                     break
 
-                # Handle audio output
-                if "audioOutput" in event:
+                # Handle audio output - now BidiAudioStreamEvent
+                if isinstance(event, BidiAudioStreamEvent):
                     if not self.interrupted:
-                        self.audio_output_queue.put_nowait(
-                            event["audioOutput"]["audioData"]
-                        )
+                        # Event.audio is base64 string
+                        self.audio_output_queue.put_nowait(event.audio)
 
-                # Handle interruption events
-                elif "interruptionDetected" in event:
-                    self.interrupted = True
-                elif "interrupted" in event:
+                # Handle interruption events - now BidiInterruptionEvent
+                elif isinstance(event, BidiInterruptionEvent):
                     self.interrupted = True
 
-                # Handle text output
-                elif "textOutput" in event:
-                    text_content = event["textOutput"].get("content", "")
-                    role = event["textOutput"].get("role", "unknown")
+                # Handle text output - now BidiTranscriptStreamEvent
+                elif isinstance(event, BidiTranscriptStreamEvent):
+                    text_content = event.text
+                    role = event.role
 
                     # Check for text-based interruption patterns
                     if '{ "interrupted" : true }' in text_content:
@@ -367,9 +381,9 @@ class SpeechSession:
                     elif role.upper() == "ASSISTANT":
                         print(f"[ASSISTANT] {text_content}")
 
-                # Handle tool usage
-                elif "toolUse" in event:
-                    tool_use_data = event["toolUse"]
+                # Handle tool usage - ToolUseStreamEvent from core strands
+                elif "delta" in event and "toolUse" in event.get("delta", {}):
+                    tool_use_data = event["delta"]["toolUse"]
                     tool_name = tool_use_data["name"]
                     print(f"[TOOL] Calling: {tool_name}")
 
@@ -381,15 +395,23 @@ class SpeechSession:
     async def _send_to_agent(self) -> None:
         """Send audio to agent - matches test pattern."""
         try:
+            # Import BidiAudioInputEvent
+            from strands.experimental.bidirectional_streaming.types.events import (
+                BidiAudioInputEvent,
+            )
+            
             while self.active:
                 try:
                     audio_bytes = self.audio_input_queue.get_nowait()
-                    audio_event = {
-                        "audioData": audio_bytes,
-                        "format": "pcm",
-                        "sampleRate": INPUT_SAMPLE_RATE,
-                        "channels": 1,
-                    }
+                    # Convert bytes to base64 string for BidiAudioInputEvent
+                    audio_b64 = base64.b64encode(audio_bytes).decode('utf-8')
+                    
+                    audio_event = BidiAudioInputEvent(
+                        audio=audio_b64,
+                        format="pcm",
+                        sample_rate=self.input_sample_rate,
+                        channels=1,
+                    )
                     await self.agent.send(audio_event)
                 except asyncio.QueueEmpty:
                     await asyncio.sleep(0.01)
@@ -655,17 +677,39 @@ def _start_speech_session(
         model_settings = model_settings or {}
         model_info = f"{provider}"
 
+        # Configure audio I/O based on provider
+        # Nova Sonic: 16000/16000 (default)
+        # OpenAI/Gemini: 24000/24000 (higher quality)
+        from strands.experimental.bidirectional_streaming.io.audio import BidiAudioIO
+        
+        if provider == "novasonic":
+            # Nova Sonic uses 16000 Hz
+            audio_io = BidiAudioIO(
+                audio_config={
+                    "input_sample_rate": 16000,
+                    "output_sample_rate": 16000
+                }
+            )
+        else:
+            # OpenAI and Gemini use 24000 Hz
+            audio_io = BidiAudioIO(
+                audio_config={
+                    "input_sample_rate": 24000,
+                    "output_sample_rate": 24000
+                }
+            )
+
         try:
             if provider == "novasonic":
-                model = NovaSonicBidirectionalModel(**model_settings)
+                model = BidiNovaSonicModel(**model_settings)
                 model_info = f"Nova Sonic ({model_settings.get('region', 'us-east-1')})"
             elif provider == "openai":
-                model = OpenAIRealtimeBidirectionalModel(**model_settings)
+                model = BidiOpenAIRealtimeModel(**model_settings)
                 model_info = (
                     f"OpenAI Realtime ({model_settings.get('model', 'gpt-realtime')})"
                 )
             elif provider == "gemini_live":
-                model = GeminiLiveBidirectionalModel(**model_settings)
+                model = BidiGeminiLiveModel(**model_settings)
                 model_info = f"Gemini Live ({model_settings.get('model_id', 'gemini-2.0-flash-live')})"
             else:
                 return f"❌ Unknown provider: {provider}. Supported: novasonic, openai, gemini_live"
@@ -729,10 +773,21 @@ Examples:
 
 Always prefer using tools over generating text responses when tools are available. Keep your voice responses brief and natural."""
 
-        # Create bidirectional agent with inherited tools
-        bidi_agent = BidirectionalAgent(
-            model=model, tools=tools, system_prompt=system_prompt
+        # Create bidirectional agent with inherited tools and audio I/O
+        bidi_agent = BidiAgent(
+            model=model, 
+            tools=tools, 
+            system_prompt=system_prompt,
+            audio_io=audio_io
         )
+
+        # Determine sample rates based on provider
+        if provider == "novasonic":
+            input_rate = 16000
+            output_rate = 16000
+        else:  # openai, gemini_live
+            input_rate = 24000
+            output_rate = 24000
 
         # Create and start session
         session = SpeechSession(
@@ -740,6 +795,8 @@ Always prefer using tools over generating text responses when tools are availabl
             agent=bidi_agent,
             audio_input_enabled=audio_input,
             audio_output_enabled=audio_output,
+            input_sample_rate=input_rate,
+            output_sample_rate=output_rate,
         )
 
         session.start()

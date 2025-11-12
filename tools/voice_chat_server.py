@@ -117,15 +117,15 @@ from typing import Any, Dict, List, Optional
 
 from strands import tool
 
-from strands.experimental.bidirectional_streaming.agent.agent import BidirectionalAgent
+from strands.experimental.bidirectional_streaming.agent.agent import BidiAgent
 from strands.experimental.bidirectional_streaming.models.gemini_live import (
-    GeminiLiveBidirectionalModel,
+    BidiGeminiLiveModel,
 )
 from strands.experimental.bidirectional_streaming.models.novasonic import (
-    NovaSonicBidirectionalModel,
+    BidiNovaSonicModel,
 )
 from strands.experimental.bidirectional_streaming.models.openai import (
-    OpenAIRealtimeBidirectionalModel,
+    BidiOpenAIRealtimeModel,
 )
 
 logger = logging.getLogger(__name__)
@@ -430,9 +430,33 @@ def _start_voice_chat_server(
         model_settings = model_settings or {}
         model_info = f"{provider}"
 
+        # Configure audio I/O based on provider
+        # Nova Sonic: 16000/16000 (default)
+        # OpenAI/Gemini: 24000/24000 (higher quality)
+        from strands.experimental.bidirectional_streaming.io.audio import BidiAudioIO
+        
+        if provider == "novasonic":
+            # Nova Sonic uses 16000 Hz
+            audio_io = BidiAudioIO(
+                audio_config={
+                    "input_sample_rate": 16000,
+                    "output_sample_rate": 16000
+                }
+            )
+            browser_sample_rate = 16000
+        else:
+            # OpenAI and Gemini use 24000 Hz
+            audio_io = BidiAudioIO(
+                audio_config={
+                    "input_sample_rate": 24000,
+                    "output_sample_rate": 24000
+                }
+            )
+            browser_sample_rate = 24000
+
         try:
             if provider == "novasonic":
-                model = NovaSonicBidirectionalModel(**model_settings)
+                model = BidiNovaSonicModel(**model_settings)
                 voice_info = (
                     f" (voice: {model_settings['voice_id']})"
                     if "voice_id" in model_settings
@@ -440,12 +464,12 @@ def _start_voice_chat_server(
                 )
                 model_info = f"Nova Sonic ({model_settings.get('region', 'us-east-1')}){voice_info}"
             elif provider == "openai":
-                model = OpenAIRealtimeBidirectionalModel(**model_settings)
+                model = BidiOpenAIRealtimeModel(**model_settings)
                 model_info = (
                     f"OpenAI Realtime ({model_settings.get('model', 'gpt-realtime')})"
                 )
             elif provider == "gemini_live":
-                model = GeminiLiveBidirectionalModel(**model_settings)
+                model = BidiGeminiLiveModel(**model_settings)
                 model_info = f"Gemini Live ({model_settings.get('model_id', 'gemini-2.0-flash-live')})"
             else:
                 return f"❌ Unknown provider: {provider}. Supported: novasonic, openai, gemini_live"
@@ -519,6 +543,8 @@ Always prefer using tools over generating text responses when tools are availabl
             "provider": provider,
             "model_info": model_info,
             "model": model,
+            "audio_io": audio_io,
+            "browser_sample_rate": browser_sample_rate,
             "tools": tools,
             "system_prompt": system_prompt,
             "active": True,
@@ -545,11 +571,12 @@ Always prefer using tools over generating text responses when tools are availabl
                     )
 
                     try:
-                        # Create bidirectional agent for this client
-                        client_agent = BidirectionalAgent(
+                        # Create bidirectional agent for this client with audio I/O
+                        client_agent = BidiAgent(
                             model=server_context["model"],
                             tools=server_context["tools"],
                             system_prompt=server_context["system_prompt"],
+                            audio_io=server_context["audio_io"],
                         )
 
                         await client_agent.start()
@@ -563,12 +590,13 @@ Always prefer using tools over generating text responses when tools are availabl
                             "tasks": [],
                         }
 
-                        # Send connection success
+                        # Send connection success with sample rate info
                         connection_msg = json.dumps(
                             {
                                 "type": "connected",
                                 "client_id": client_id,
                                 "provider": server_context["provider"],
+                                "sample_rate": server_context["browser_sample_rate"],
                             }
                         )
                         await websocket.send(connection_msg)
@@ -584,6 +612,8 @@ Always prefer using tools over generating text responses when tools are availabl
                                 client_agent, websocket, client_id, server_context
                             )
                         )
+                        
+                        logger.info(f"Client {client_id} connected - using {server_context['browser_sample_rate']} Hz audio")
 
                         # Store tasks for cleanup
                         server_context["clients"][client_id]["tasks"] = [
@@ -612,7 +642,7 @@ Always prefer using tools over generating text responses when tools are availabl
 
                             # End agent
                             try:
-                                await client_context["agent"].end()
+                                await client_context["agent"].stop()
                             except:
                                 pass
 
@@ -662,10 +692,13 @@ Always prefer using tools over generating text responses when tools are availabl
 - Port: {port}
 - Provider: {model_info}
 - WebSocket URL: ws://localhost:{port}
+- **Audio Sample Rate:** {browser_sample_rate} Hz (configure browser to match)
 - **Tools Inherited:** {inherited_count} tools from parent agent (including stop_voice_chat){settings_summary}
 
 **Connect from browser:**
 Open voice_chat.html in your browser and connect to ws://localhost:{port}
+
+**Important:** Browser audio must be configured for {browser_sample_rate} Hz sample rate to match the provider.
 
 **Note:** Keep your microphone active for automatic interruption detection! The AI will automatically stop when you start speaking.
 
@@ -681,19 +714,24 @@ Server ready for voice chat! 🎤"""
 async def _receive_from_agent(agent, websocket, client_id: str, context: dict) -> None:
     """Receive events from bidirectional agent and send to browser."""
     try:
+        # Import TypedEvent classes
+        from strands.experimental.bidirectional_streaming.types.events import (
+            BidiAudioStreamEvent,
+            BidiTranscriptStreamEvent,
+            BidiInterruptionEvent,
+        )
+        
         async for event in agent.receive():
             client_context = context["clients"].get(client_id)
             if not client_context or not client_context["active"]:
                 break
 
-            # Handle interruption
-            if "interruptionDetected" in event:
-                client_context["interrupted"] = True
-            elif "interrupted" in event:
+            # Handle interruption - now BidiInterruptionEvent
+            if isinstance(event, BidiInterruptionEvent):
                 client_context["interrupted"] = True
 
-            # Convert agent events to browser format
-            browser_event = _convert_agent_event_to_browser(event, client_context)
+            # Convert agent events to browser format, passing server context
+            browser_event = _convert_agent_event_to_browser(event, client_context, context)
 
             if browser_event:
                 try:
@@ -712,6 +750,11 @@ async def _receive_from_browser(
 ) -> None:
     """Receive messages from browser and send to bidirectional agent."""
     try:
+        # Import BidiAudioInputEvent for audio sending
+        from strands.experimental.bidirectional_streaming.types.events import (
+            BidiAudioInputEvent,
+        )
+        
         async for message in websocket:
             client_context = context["clients"].get(client_id)
             if not client_context or not client_context["active"]:
@@ -722,16 +765,18 @@ async def _receive_from_browser(
                 msg_type = data.get("type")
 
                 if msg_type == "audio":
-                    # Browser sends base64 audio
+                    # Browser sends base64 audio at server's configured rate
                     audio_base64 = data.get("audioData")
-                    audio_bytes = base64.b64decode(audio_base64)
+                    
+                    # Use server's configured sample rate
+                    sample_rate = context.get("browser_sample_rate", 16000)
 
-                    audio_event = {
-                        "audioData": audio_bytes,
-                        "format": "pcm",
-                        "sampleRate": data.get("sampleRate", 16000),
-                        "channels": data.get("channels", 1),
-                    }
+                    audio_event = BidiAudioInputEvent(
+                        audio=audio_base64,
+                        format="pcm",
+                        sample_rate=sample_rate,
+                        channels=data.get("channels", 1),
+                    )
                     await agent.send(audio_event)
 
                     # Clear interrupted flag when user audio is received
@@ -746,7 +791,7 @@ async def _receive_from_browser(
                 elif msg_type == "interrupt":
                     # User wants to interrupt
                     client_context["interrupted"] = True
-                    await agent.interrupt()
+                    # Agent handles interruption internally through VAD
 
             except json.JSONDecodeError:
                 pass
@@ -759,46 +804,68 @@ async def _receive_from_browser(
         logger.error(f"Browser receive error ({client_id}): {e}")
 
 
-def _convert_agent_event_to_browser(event: dict, client_context: dict):
+def _convert_agent_event_to_browser(event: dict, client_context: dict, server_context: dict):
     """Convert bidirectional agent events to browser-friendly format."""
-    # Audio output - check for interruption
-    if "audioOutput" in event:
+    # Import TypedEvent classes
+    from strands.experimental.bidirectional_streaming.types.events import (
+        BidiAudioStreamEvent,
+        BidiTranscriptStreamEvent,
+        BidiInterruptionEvent,
+    )
+    
+    # Audio output - now BidiAudioStreamEvent, check for interruption
+    if isinstance(event, BidiAudioStreamEvent):
         # Don't send audio if interrupted
         if client_context.get("interrupted", False):
             return None
 
-        audio_data = event["audioOutput"]["audioData"]
-        sample_rate = event["audioOutput"].get("sampleRate", 24000)
+        # Use server's configured sample rate, not event's (which might be wrong)
+        sample_rate = server_context["browser_sample_rate"]
+        
+        # Log first few audio packets for debugging
+        if not hasattr(client_context, '_audio_count'):
+            client_context['_audio_count'] = 0
+        client_context['_audio_count'] += 1
+        
+        if client_context['_audio_count'] <= 3:
+            logger.info(f"Sending audio #{client_context['_audio_count']}: "
+                       f"event.sample_rate={event.sample_rate}, "
+                       f"using configured={sample_rate} Hz")
+
+        # Event.audio is base64 string
         return {
             "type": "audio",
-            "audioData": base64.b64encode(audio_data).decode(),
-            "sampleRate": sample_rate,
-            "channels": event["audioOutput"].get("channels", 1),
+            "audioData": event.audio,
+            "sampleRate": sample_rate,  # Use server's configured rate
+            "channels": event.channels,
         }
 
-    # Text output (transcripts)
-    elif "textOutput" in event:
-        text = event["textOutput"]["text"]
-        role = event["textOutput"].get("role", "assistant")
+    # Text output - now BidiTranscriptStreamEvent (transcripts)
+    elif isinstance(event, BidiTranscriptStreamEvent):
+        text = event.text
+        role = event.role
         print(f"[{role.upper()}] {text}")
         return {"type": "text", "text": text, "role": role}
 
-    # Interruption detected - user started speaking (VAD detected)
-    elif "interruptionDetected" in event:
-        return {"type": "interrupted", "reason": "voice_activity_detected"}
+    # Interruption detected - now BidiInterruptionEvent
+    elif isinstance(event, BidiInterruptionEvent):
+        return {"type": "interrupted", "reason": event.reason}
 
-    # Tool usage
-    elif "toolUse" in event:
-        tool_name = event["toolUse"]["name"]
-        tool_id = event["toolUse"]["toolUseId"]
+    # Tool usage - ToolUseStreamEvent from core strands
+    elif "delta" in event and "toolUse" in event.get("delta", {}):
+        tool_use_data = event["delta"]["toolUse"]
+        tool_name = tool_use_data["name"]
+        tool_id = tool_use_data["toolUseId"]
         print(f"[TOOL] Calling: {tool_name}")
         return {"type": "tool_use", "name": tool_name, "id": tool_id}
 
-    # Connection events
-    elif "BidirectionalConnectionStart" in event:
-        return {"type": "connection_start"}
-    elif "BidirectionalConnectionEnd" in event:
-        return {"type": "connection_end"}
+    # Connection events - these are from TypedEvent classes too
+    elif isinstance(event, dict):
+        event_type = event.get("type")
+        if event_type == "bidi_connection_start":
+            return {"type": "connection_start"}
+        elif event_type == "bidi_connection_close":
+            return {"type": "connection_end"}
 
     return None
 

@@ -33,6 +33,7 @@ from pydantic import BaseModel
 from .. import _identifier
 from .._async import run_async
 from ..event_loop.event_loop import event_loop_cycle
+from ..tools._tool_helpers import generate_missing_tool_result_content
 
 if TYPE_CHECKING:
     from ..experimental.tools import ToolProvider
@@ -50,6 +51,7 @@ from ..models.model import Model
 from ..session.session_manager import SessionManager
 from ..telemetry.metrics import EventLoopMetrics
 from ..telemetry.tracer import get_tracer, serialize
+from ..tools.caller import _ToolCaller
 from ..tools.executors import ConcurrentToolExecutor
 from ..tools.executors._executor import ToolExecutor
 from ..tools.registry import ToolRegistry
@@ -57,7 +59,7 @@ from ..tools.structured_output._structured_output_context import StructuredOutpu
 from ..tools.watcher import ToolWatcher
 from ..types._events import AgentResultEvent, InitEventLoopEvent, ModelStreamChunkEvent, ToolInterruptEvent, TypedEvent
 from ..types.agent import AgentInput
-from ..types.content import ContentBlock, Message, Messages
+from ..types.content import ContentBlock, Message, Messages, SystemContentBlock
 from ..types.exceptions import ContextWindowOverflowException
 from ..types.interrupt import InterruptResponseContent
 from ..types.tools import ToolResult, ToolUse
@@ -101,122 +103,12 @@ class Agent:
     6. Produces a final response
     """
 
-    class ToolCaller:
-        """Call tool as a function."""
-
-        def __init__(self, agent: "Agent") -> None:
-            """Initialize instance.
-
-            Args:
-                agent: Agent reference that will accept tool results.
-            """
-            # WARNING: Do not add any other member variables or methods as this could result in a name conflict with
-            #          agent tools and thus break their execution.
-            self._agent = agent
-
-        def __getattr__(self, name: str) -> Callable[..., Any]:
-            """Call tool as a function.
-
-            This method enables the method-style interface (e.g., `agent.tool.tool_name(param="value")`).
-            It matches underscore-separated names to hyphenated tool names (e.g., 'some_thing' matches 'some-thing').
-
-            Args:
-                name: The name of the attribute (tool) being accessed.
-
-            Returns:
-                A function that when called will execute the named tool.
-
-            Raises:
-                AttributeError: If no tool with the given name exists or if multiple tools match the given name.
-            """
-
-            def caller(
-                user_message_override: Optional[str] = None,
-                record_direct_tool_call: Optional[bool] = None,
-                **kwargs: Any,
-            ) -> Any:
-                """Call a tool directly by name.
-
-                Args:
-                    user_message_override: Optional custom message to record instead of default
-                    record_direct_tool_call: Whether to record direct tool calls in message history. Overrides class
-                        attribute if provided.
-                    **kwargs: Keyword arguments to pass to the tool.
-
-                Returns:
-                    The result returned by the tool.
-
-                Raises:
-                    AttributeError: If the tool doesn't exist.
-                """
-                if self._agent._interrupt_state.activated:
-                    raise RuntimeError("cannot directly call tool during interrupt")
-
-                normalized_name = self._find_normalized_tool_name(name)
-
-                # Create unique tool ID and set up the tool request
-                tool_id = f"tooluse_{name}_{random.randint(100000000, 999999999)}"
-                tool_use: ToolUse = {
-                    "toolUseId": tool_id,
-                    "name": normalized_name,
-                    "input": kwargs.copy(),
-                }
-                tool_results: list[ToolResult] = []
-                invocation_state = kwargs
-
-                async def acall() -> ToolResult:
-                    async for event in ToolExecutor._stream(self._agent, tool_use, tool_results, invocation_state):
-                        if isinstance(event, ToolInterruptEvent):
-                            self._agent._interrupt_state.deactivate()
-                            raise RuntimeError("cannot raise interrupt in direct tool call")
-
-                    return tool_results[0]
-
-                tool_result = run_async(acall)
-
-                if record_direct_tool_call is not None:
-                    should_record_direct_tool_call = record_direct_tool_call
-                else:
-                    should_record_direct_tool_call = self._agent.record_direct_tool_call
-
-                if should_record_direct_tool_call:
-                    # Create a record of this tool execution in the message history
-                    self._agent._record_tool_execution(tool_use, tool_result, user_message_override)
-
-                # Apply window management
-                self._agent.conversation_manager.apply_management(self._agent)
-
-                return tool_result
-
-            return caller
-
-        def _find_normalized_tool_name(self, name: str) -> str:
-            """Lookup the tool represented by name, replacing characters with underscores as necessary."""
-            tool_registry = self._agent.tool_registry.registry
-
-            if tool_registry.get(name, None):
-                return name
-
-            # If the desired name contains underscores, it might be a placeholder for characters that can't be
-            # represented as python identifiers but are valid as tool names, such as dashes. In that case, find
-            # all tools that can be represented with the normalized name
-            if "_" in name:
-                filtered_tools = [
-                    tool_name for (tool_name, tool) in tool_registry.items() if tool_name.replace("-", "_") == name
-                ]
-
-                # The registry itself defends against similar names, so we can just take the first match
-                if filtered_tools:
-                    return filtered_tools[0]
-
-            raise AttributeError(f"Tool '{name}' not found")
-
     def __init__(
         self,
         model: Union[Model, str, None] = None,
         messages: Optional[Messages] = None,
         tools: Optional[list[Union[str, dict[str, str], "ToolProvider", Any]]] = None,
-        system_prompt: Optional[str] = None,
+        system_prompt: Optional[str | list[SystemContentBlock]] = None,
         structured_output_model: Optional[Type[BaseModel]] = None,
         callback_handler: Optional[
             Union[Callable[..., Any], _DefaultCallbackHandlerSentinel]
@@ -253,6 +145,7 @@ class Agent:
 
                 If provided, only these tools will be available. If None, all tools will be available.
             system_prompt: System prompt to guide model behavior.
+                Can be a string or a list of SystemContentBlock objects for advanced features like caching.
                 If None, the model will behave according to its default settings.
             structured_output_model: Pydantic model type(s) for structured output.
                 When specified, all agent calls will attempt to return structured output of this type.
@@ -280,14 +173,15 @@ class Agent:
                 Defaults to None.
             session_manager: Manager for handling agent sessions including conversation history and state.
                 If provided, enables session-based persistence and state management.
-            tool_executor: Definition of tool execution stragety (e.g., sequential, concurrent, etc.).
+            tool_executor: Definition of tool execution strategy (e.g., sequential, concurrent, etc.).
 
         Raises:
             ValueError: If agent id contains path separators.
         """
         self.model = BedrockModel() if not model else BedrockModel(model_id=model) if isinstance(model, str) else model
         self.messages = messages if messages is not None else []
-        self.system_prompt = system_prompt
+        # initializing self.system_prompt for backwards compatibility
+        self.system_prompt, self._system_prompt_content = self._initialize_system_prompt(system_prompt)
         self._default_structured_output_model = structured_output_model
         self.agent_id = _identifier.validate(agent_id or _DEFAULT_AGENT_ID, _identifier.Identifier.AGENT)
         self.name = name or _DEFAULT_AGENT_NAME
@@ -346,7 +240,7 @@ class Agent:
         else:
             self.state = AgentState()
 
-        self.tool_caller = Agent.ToolCaller(self)
+        self.tool_caller = _ToolCaller(self)
 
         self.hooks = HookRegistry()
 
@@ -365,7 +259,7 @@ class Agent:
         self.hooks.invoke_callbacks(AgentInitializedEvent(agent=self))
 
     @property
-    def tool(self) -> ToolCaller:
+    def tool(self) -> _ToolCaller:
         """Call tool as a function.
 
         Returns:
@@ -752,9 +646,9 @@ class Agent:
                     and event.chunk.get("redactContent")
                     and event.chunk["redactContent"].get("redactUserContentMessage")
                 ):
-                    self.messages[-1]["content"] = [
-                        {"text": str(event.chunk["redactContent"]["redactUserContentMessage"])}
-                    ]
+                    self.messages[-1]["content"] = self._redact_user_content(
+                        self.messages[-1]["content"], str(event.chunk["redactContent"]["redactUserContentMessage"])
+                    )
                     if self._session_manager:
                         self._session_manager.redact_latest_message(self.messages[-1], self)
                 yield event
@@ -816,6 +710,21 @@ class Agent:
 
         messages: Messages | None = None
         if prompt is not None:
+            # Check if the latest message is toolUse
+            if len(self.messages) > 0 and any("toolUse" in content for content in self.messages[-1]["content"]):
+                # Add toolResult message after to have a valid conversation
+                logger.info(
+                    "Agents latest message is toolUse, appending a toolResult message to have valid conversation."
+                )
+                tool_use_ids = [
+                    content["toolUse"]["toolUseId"] for content in self.messages[-1]["content"] if "toolUse" in content
+                ]
+                self._append_message(
+                    {
+                        "role": "user",
+                        "content": generate_missing_tool_result_content(tool_use_ids),
+                    }
+                )
             if isinstance(prompt, str):
                 # String input - convert to user message
                 messages = [{"role": "user", "content": [{"text": prompt}]}]
@@ -965,7 +874,57 @@ class Agent:
         properties = tool_spec["inputSchema"]["json"]["properties"]
         return {k: v for k, v in input_params.items() if k in properties}
 
+    def _initialize_system_prompt(
+        self, system_prompt: str | list[SystemContentBlock] | None
+    ) -> tuple[str | None, list[SystemContentBlock] | None]:
+        """Initialize system prompt fields from constructor input.
+
+        Maintains backwards compatibility by keeping system_prompt as str when string input
+        provided, avoiding breaking existing consumers.
+
+        Maps system_prompt input to both string and content block representations:
+        - If string: system_prompt=string, _system_prompt_content=[{text: string}]
+        - If list with text elements: system_prompt=concatenated_text, _system_prompt_content=list
+        - If list without text elements: system_prompt=None, _system_prompt_content=list
+        - If None: system_prompt=None, _system_prompt_content=None
+        """
+        if isinstance(system_prompt, str):
+            return system_prompt, [{"text": system_prompt}]
+        elif isinstance(system_prompt, list):
+            # Concatenate all text elements for backwards compatibility, None if no text found
+            text_parts = [block["text"] for block in system_prompt if "text" in block]
+            system_prompt_str = "\n".join(text_parts) if text_parts else None
+            return system_prompt_str, system_prompt
+        else:
+            return None, None
+
     def _append_message(self, message: Message) -> None:
         """Appends a message to the agent's list of messages and invokes the callbacks for the MessageCreatedEvent."""
         self.messages.append(message)
         self.hooks.invoke_callbacks(MessageAddedEvent(agent=self, message=message))
+
+    def _redact_user_content(self, content: list[ContentBlock], redact_message: str) -> list[ContentBlock]:
+        """Redact user content preserving toolResult blocks.
+
+        Args:
+            content: content blocks to be redacted
+            redact_message: redact message to be replaced
+
+        Returns:
+            Redacted content, as follows:
+            - if the message contains at least a toolResult block,
+                all toolResult blocks(s) are kept, redacting only the result content;
+            - otherwise, the entire content of the message is replaced
+                with a single text block with the redact message.
+        """
+        redacted_content = []
+        for block in content:
+            if "toolResult" in block:
+                block["toolResult"]["content"] = [{"text": redact_message}]
+                redacted_content.append(block)
+
+        if not redacted_content:
+            # Text content is added only if no toolResult blocks were found
+            redacted_content = [{"text": redact_message}]
+
+        return redacted_content

@@ -5,6 +5,7 @@ interruption handling, and concurrent tool execution using Nova Sonic.
 """
 
 import asyncio
+import base64
 import sys
 from pathlib import Path
 
@@ -16,10 +17,8 @@ import time
 import pyaudio
 from strands_tools import calculator
 
-from strands.experimental.bidirectional_streaming.agent.agent import BidirectionalAgent
-from strands.experimental.bidirectional_streaming.models.novasonic import (
-    NovaSonicBidirectionalModel,
-)
+from strands.experimental.bidirectional_streaming.agent.agent import BidiAgent
+from strands.experimental.bidirectional_streaming.models.novasonic import BidiNovaSonicModel
 
 
 def test_direct_tools():
@@ -32,7 +31,7 @@ def test_direct_tools():
         return
 
     try:
-        model = NovaSonicBidirectionalModel()
+        model = BidiNovaSonicModel()
         agent = BidirectionalAgent(model=model, tools=[calculator])
 
         # Test calculator
@@ -131,33 +130,54 @@ async def receive(agent, context):
     """Receive and process events from agent."""
     try:
         async for event in agent.receive():
-            # Handle audio output
-            if "audioOutput" in event:
+            event_type = event.get("type", "unknown")
+            
+            # Handle audio stream events (bidi_audio_stream)
+            if event_type == "bidi_audio_stream":
                 if not context.get("interrupted", False):
-                    context["audio_out"].put_nowait(event["audioOutput"]["audioData"])
+                    # Decode base64 audio string to bytes for playback
+                    audio_b64 = event["audio"]
+                    audio_data = base64.b64decode(audio_b64)
+                    context["audio_out"].put_nowait(audio_data)
 
-            # Handle interruption events
-            elif "interruptionDetected" in event:
+            # Handle interruption events (bidi_interruption)
+            elif event_type == "bidi_interruption":
                 context["interrupted"] = True
-            elif "interrupted" in event:
-                context["interrupted"] = True
 
-            # Handle text output with interruption detection
-            elif "textOutput" in event:
-                text_content = event["textOutput"].get("content", "")
-                role = event["textOutput"].get("role", "unknown")
-
-                # Check for text-based interruption patterns
-                if '{ "interrupted" : true }' in text_content:
-                    context["interrupted"] = True
-                elif "interrupted" in text_content.lower():
-                    context["interrupted"] = True
-
-                # Log text output
-                if role.upper() == "USER":
+            # Handle transcript events (bidi_transcript_stream)
+            elif event_type == "bidi_transcript_stream":
+                text_content = event.get("text", "")
+                role = event.get("role", "unknown")
+                
+                # Log transcript output
+                if role == "user":
                     print(f"User: {text_content}")
-                elif role.upper() == "ASSISTANT":
+                elif role == "assistant":
                     print(f"Assistant: {text_content}")
+            
+            # Handle response complete events (bidi_response_complete)
+            elif event_type == "bidi_response_complete":
+                # Reset interrupted state since the turn is complete
+                context["interrupted"] = False
+            
+            # Handle tool use events (tool_use_stream)
+            elif event_type == "tool_use_stream":
+                tool_use = event.get("current_tool_use", {})
+                tool_name = tool_use.get("name", "unknown")
+                tool_input = tool_use.get("input", {})
+                print(f"🔧 Tool called: {tool_name} with input: {tool_input}")
+            
+            # Handle tool result events (tool_result)
+            elif event_type == "tool_result":
+                tool_result = event.get("tool_result", {})
+                tool_name = tool_result.get("name", "unknown")
+                result_content = tool_result.get("content", [])
+                result_text = ""
+                for block in result_content:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        result_text = block.get("text", "")
+                        break
+                print(f"✅ Tool result from {tool_name}: {result_text}")
 
     except asyncio.CancelledError:
         pass
@@ -169,12 +189,16 @@ async def send(agent, context):
         while time.time() - context["start_time"] < context["duration"]:
             try:
                 audio_bytes = context["audio_in"].get_nowait()
-                audio_event = {
-                    "audioData": audio_bytes,
-                    "format": "pcm",
-                    "sampleRate": 16000,
-                    "channels": 1,
-                }
+                # Create audio event using TypedEvent
+                from strands.experimental.bidirectional_streaming.types.events import BidiAudioInputEvent
+                
+                audio_b64 = base64.b64encode(audio_bytes).decode('utf-8')
+                audio_event = BidiAudioInputEvent(
+                    audio=audio_b64,
+                    format="pcm",
+                    sample_rate=16000,
+                    channels=1
+                )
                 await agent.send(audio_event)
             except asyncio.QueueEmpty:
                 await asyncio.sleep(0.01)  # Restored to working timing
@@ -192,8 +216,8 @@ async def main(duration=180):
     print("Audio optimizations: 1024-byte buffers, balanced smooth playback + responsive interruption")
 
     # Initialize model and agent
-    model = NovaSonicBidirectionalModel(region="us-east-1")
-    agent = BidirectionalAgent(model=model, tools=[calculator], system_prompt="You are a helpful assistant.")
+    model = BidiNovaSonicModel(region="us-east-1")
+    agent = BidiAgent(model=model, tools=[calculator], system_prompt="You are a helpful assistant.")
 
     await agent.start()
 
@@ -202,7 +226,7 @@ async def main(duration=180):
         "active": True,
         "audio_in": asyncio.Queue(),
         "audio_out": asyncio.Queue(),
-        "connection": agent._session,
+        "connection": agent._agent_loop,
         "duration": duration,
         "start_time": time.time(),
         "interrupted": False,
@@ -213,11 +237,7 @@ async def main(duration=180):
     try:
         # Run all tasks concurrently
         await asyncio.gather(
-            play(context),
-            record(context),
-            receive(agent, context),
-            send(agent, context),
-            return_exceptions=True,
+            play(context), record(context), receive(agent, context), send(agent, context), return_exceptions=True
         )
     except KeyboardInterrupt:
         print("\nInterrupted by user")
@@ -226,7 +246,7 @@ async def main(duration=180):
     finally:
         print("Cleaning up...")
         context["active"] = False
-        await agent.end()
+        await agent.stop()
 
 
 if __name__ == "__main__":
