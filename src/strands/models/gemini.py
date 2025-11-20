@@ -65,6 +65,10 @@ class GeminiModel(Model):
 
         self.client_args = client_args or {}
 
+        # Mapping from unique toolUseId to function name for Gemini compatibility
+        self._tool_use_id_to_name: dict[str, str] = {}
+        self._tool_use_counter = 0
+
     @override
     def update_config(self, **model_config: Unpack[GeminiConfig]) -> None:  # type: ignore[override]
         """Update the Gemini model configuration with the provided arguments.
@@ -123,10 +127,13 @@ class GeminiModel(Model):
             return genai.types.Part(text=content["text"])
 
         if "toolResult" in content:
+            tool_use_id = content["toolResult"]["toolUseId"]
+            # Look up the function name from the mapping, fallback to toolUseId if not found
+            function_name = self._tool_use_id_to_name.get(tool_use_id, tool_use_id)
             return genai.types.Part(
                 function_response=genai.types.FunctionResponse(
-                    id=content["toolResult"]["toolUseId"],
-                    name=content["toolResult"]["toolUseId"],
+                    id=tool_use_id,
+                    name=function_name,
                     response={
                         "output": [
                             tool_result_content
@@ -264,16 +271,19 @@ class GeminiModel(Model):
             case "content_start":
                 match event["data_type"]:
                     case "tool":
-                        # Note: toolUseId is the only identifier available in a tool result. However, Gemini requires
-                        #       that name be set in the equivalent FunctionResponse type. Consequently, we assign
-                        #       function name to toolUseId in our tool use block. And another reason, function_call is
-                        #       not guaranteed to have id populated.
+                        # Generate unique toolUseId and map it to the function name
+                        # Gemini requires function name in FunctionResponse, but we need unique IDs
+                        function_name = event["data"].function_call.name
+                        tool_use_id = f"tooluse_{self._tool_use_counter}"
+                        self._tool_use_counter += 1
+                        self._tool_use_id_to_name[tool_use_id] = function_name
+
                         return {
                             "contentBlockStart": {
                                 "start": {
                                     "toolUse": {
-                                        "name": event["data"].function_call.name,
-                                        "toolUseId": event["data"].function_call.name,
+                                        "name": function_name,
+                                        "toolUseId": tool_use_id,
                                     },
                                 },
                             },
@@ -363,6 +373,9 @@ class GeminiModel(Model):
         Raises:
             ModelThrottledException: If the request is throttled by Gemini.
         """
+        # Reset tool use counter for each new stream to ensure unique IDs per request
+        self._tool_use_counter = 0
+
         request = self._format_request(messages, tool_specs, system_prompt, self.config.get("params"))
 
         client = genai.Client(**self.client_args).aio

@@ -459,7 +459,7 @@ async def test_stream_response_tool_use(gemini_client, model, messages, agenerat
     exp_chunks = [
         {"messageStart": {"role": "assistant"}},
         {"contentBlockStart": {"start": {}}},
-        {"contentBlockStart": {"start": {"toolUse": {"name": "calculator", "toolUseId": "calculator"}}}},
+        {"contentBlockStart": {"start": {"toolUse": {"name": "calculator", "toolUseId": "tooluse_0"}}}},
         {"contentBlockDelta": {"delta": {"toolUse": {"input": '{"expression": "2+2"}'}}}},
         {"contentBlockStop": {}},
         {"contentBlockStop": {}},
@@ -467,6 +467,60 @@ async def test_stream_response_tool_use(gemini_client, model, messages, agenerat
         {"metadata": {"usage": {"inputTokens": 1, "outputTokens": 2, "totalTokens": 3}, "metrics": {"latencyMs": 0}}},
     ]
     assert tru_chunks == exp_chunks
+
+
+@pytest.mark.asyncio
+async def test_stream_response_multiple_tool_uses_unique_ids(gemini_client, model, messages, agenerator, alist):
+    """Test that multiple calls to the same tool get unique toolUseId values."""
+    gemini_client.aio.models.generate_content_stream.return_value = agenerator(
+        [
+            genai.types.GenerateContentResponse(
+                candidates=[
+                    genai.types.Candidate(
+                        content=genai.types.Content(
+                            parts=[
+                                genai.types.Part(
+                                    function_call=genai.types.FunctionCall(
+                                        args={"expression": "2+2"},
+                                        id="c1",
+                                        name="calculator",
+                                    ),
+                                ),
+                                genai.types.Part(
+                                    function_call=genai.types.FunctionCall(
+                                        args={"expression": "3+3"},
+                                        id="c2",
+                                        name="calculator",
+                                    ),
+                                ),
+                            ],
+                        ),
+                        finish_reason="STOP",
+                    ),
+                ],
+                usage_metadata=genai.types.GenerateContentResponseUsageMetadata(
+                    prompt_token_count=1,
+                    total_token_count=5,
+                ),
+            ),
+        ]
+    )
+
+    tru_chunks = await alist(model.stream(messages))
+
+    # Extract toolUseId values from the chunks
+    tool_use_ids = []
+    for chunk in tru_chunks:
+        if "contentBlockStart" in chunk:
+            start = chunk["contentBlockStart"]["start"]
+            if "toolUse" in start:
+                tool_use_ids.append(start["toolUse"]["toolUseId"])
+
+    # Verify we have two unique toolUseId values
+    assert len(tool_use_ids) == 2
+    assert tool_use_ids[0] == "tooluse_0"
+    assert tool_use_ids[1] == "tooluse_1"
+    assert tool_use_ids[0] != tool_use_ids[1]  # Ensure they're different
 
 
 @pytest.mark.asyncio
