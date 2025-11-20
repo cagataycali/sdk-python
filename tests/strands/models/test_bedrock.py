@@ -2070,3 +2070,28 @@ async def test_stream_backward_compatibility_system_prompt(bedrock_client, model
         "system": [{"text": system_prompt}],
     }
     bedrock_client.converse_stream.assert_called_once_with(**expected_request)
+
+
+def test_format_bedrock_messages_preserves_cache_point_blocks(model, model_id):
+    """Test that cachePoint blocks in messages are preserved as standalone blocks."""
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"text": "Some long text" * 1000},
+                {"cachePoint": {"type": "default"}},
+            ],
+        }
+    ]
+
+    formatted_messages = model._format_bedrock_messages(messages)
+
+    # Verify the cachePoint block is preserved as a standalone block
+    assert len(formatted_messages) == 1
+    assert len(formatted_messages[0]["content"]) == 2
+
+    # First block is text
+    assert formatted_messages[0]["content"][0] == {"text": "Some long text" * 1000}
+
+    # Second block is cachePoint (standalone)
+    assert formatted_messages[0]["content"][1] == {"cachePoint": {"type": "default"}}
