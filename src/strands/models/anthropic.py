@@ -65,7 +65,10 @@ class AnthropicModel(Model):
         """Initialize provider instance.
 
         Args:
-            client_args: Arguments for the underlying Anthropic client (e.g., api_key).
+            client_args: Arguments for the underlying Anthropic client (e.g., api_key, verify).
+                For SSL/TLS configuration with self-signed certificates:
+                - Set `verify=False` to disable SSL verification (not recommended for production)
+                - Set `verify="/path/to/ca-bundle.crt"` to use a custom CA bundle
                 For a complete list of supported arguments, see https://docs.anthropic.com/en/api/client-sdks.
             **model_config: Configuration options for the Anthropic model.
         """

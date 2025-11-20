@@ -866,3 +866,24 @@ def test_tool_choice_none_no_warning(model, messages, captured_warnings):
     model.format_request(messages, tool_choice=None)
 
     assert len(captured_warnings) == 0
+
+
+def test_init_with_ssl_verification_disabled(model_id, max_tokens):
+    """Test that SSL verification can be disabled via client_args."""
+    with unittest.mock.patch.object(strands.models.anthropic.anthropic, "AsyncAnthropic") as mock_client_cls:
+        model = AnthropicModel(model_id=model_id, max_tokens=max_tokens, client_args={"verify": False})
+
+        # Verify the client was initialized with verify=False
+        mock_client_cls.assert_called_once_with(verify=False)
+        assert model is not None
+
+
+def test_init_with_custom_ca_bundle(model_id, max_tokens):
+    """Test that a custom CA bundle can be provided via client_args."""
+    with unittest.mock.patch.object(strands.models.anthropic.anthropic, "AsyncAnthropic") as mock_client_cls:
+        ca_bundle_path = "/path/to/ca-bundle.crt"
+        model = AnthropicModel(model_id=model_id, max_tokens=max_tokens, client_args={"verify": ca_bundle_path})
+
+        # Verify the client was initialized with the custom CA bundle path
+        mock_client_cls.assert_called_once_with(verify=ca_bundle_path)
+        assert model is not None

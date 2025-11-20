@@ -986,3 +986,25 @@ def test_format_request_messages_drops_cache_points():
     ]
 
     assert result == expected
+
+
+@pytest.mark.asyncio
+async def test_init_with_ssl_http_client(model_id):
+    """Test that a custom httpx client can be provided via client_args for SSL configuration."""
+    import httpx
+
+    custom_client = httpx.AsyncClient(verify=False)
+    model = OpenAIModel(model_id=model_id, params={"max_tokens": 1}, client_args={"http_client": custom_client})
+
+    # Verify the model was initialized and client_args were stored
+    assert model.client_args == {"http_client": custom_client}
+    assert model is not None
+
+
+def test_init_stores_client_args(model_id):
+    """Test that client_args are properly stored for later use."""
+    client_args = {"api_key": "test_key", "timeout": 30}
+    model = OpenAIModel(model_id=model_id, params={"max_tokens": 1}, client_args=client_args)
+
+    # Verify the client_args are stored correctly
+    assert model.client_args == client_args

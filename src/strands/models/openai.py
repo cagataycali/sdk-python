@@ -59,7 +59,11 @@ class OpenAIModel(Model):
         """Initialize provider instance.
 
         Args:
-            client_args: Arguments for the OpenAI client.
+            client_args: Arguments for the OpenAI client (e.g., api_key, http_client).
+                For SSL/TLS configuration with self-signed certificates, you can:
+                - Create a custom httpx.AsyncClient with `verify=False` (not recommended for production)
+                - Create a custom httpx.AsyncClient with a custom CA bundle
+                Example: `client_args={"http_client": httpx.AsyncClient(verify=False)}`
                 For a complete list of supported arguments, see https://pypi.org/project/openai/.
             **model_config: Configuration options for the OpenAI model.
         """
