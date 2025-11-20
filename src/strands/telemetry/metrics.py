@@ -290,6 +290,11 @@ class EventLoopMetrics:
             self._metrics_client.model_time_to_first_token.record(metrics["timeToFirstByteMs"])
         self.accumulated_metrics["latencyMs"] += metrics["latencyMs"]
 
+        # Accumulate cost if present
+        if "cost" in metrics:
+            cost = metrics["cost"]
+            self.accumulated_metrics["cost"] = self.accumulated_metrics.get("cost", 0.0) + cost
+
     def get_summary(self) -> Dict[str, Any]:
         """Generate a comprehensive summary of all collected metrics.
 
@@ -358,6 +363,11 @@ def _metrics_summary_to_lines(event_loop_metrics: EventLoopMetrics, allowed_name
 
     yield f"├─ Tokens: {', '.join(token_parts)}"
     yield f"├─ Bedrock Latency: {summary['accumulated_metrics']['latencyMs']}ms"
+
+    # Add cost if present
+    if summary["accumulated_metrics"].get("cost") is not None:
+        cost = summary["accumulated_metrics"]["cost"]
+        yield f"├─ Cost: ${cost:.10f}"
 
     yield "├─ Tool Usage:"
     for tool_name, tool_data in summary.get("tool_usage", {}).items():

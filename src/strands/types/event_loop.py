@@ -30,10 +30,12 @@ class Metrics(TypedDict, total=False):
         latencyMs (int): Latency of the model request in milliseconds.
         timeToFirstByteMs (int): Latency from sending model request to first
             content chunk (contentBlockDelta or contentBlockStart) from the model in milliseconds.
+        cost (float): Cost of the model invocation in dollars (optional, provider-specific).
     """
 
     latencyMs: Required[int]
     timeToFirstByteMs: int
+    cost: float
 
 
 StopReason = Literal[

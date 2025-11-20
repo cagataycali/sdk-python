@@ -15,7 +15,7 @@ from typing_extensions import Unpack, override
 
 from ..tools import convert_pydantic_to_tool_spec
 from ..types.content import ContentBlock, Messages, SystemContentBlock
-from ..types.event_loop import Usage
+from ..types.event_loop import Metrics, Usage
 from ..types.exceptions import ContextWindowOverflowException
 from ..types.streaming import MetadataEvent, StreamEvent
 from ..types.tools import ToolChoice, ToolSpec
@@ -229,11 +229,23 @@ class LiteLLMModel(OpenAIModel):
                 if creation := getattr(tokens_details, "cache_creation_tokens", None):
                     usage_data["cacheWriteInputTokens"] = creation
 
+            metrics_data: Metrics = {
+                "latencyMs": 0,  # TODO
+            }
+
+            # Calculate cost if a complete response object is available
+            if "completion_response" in event:
+                try:
+                    cost = litellm.completion_cost(completion_response=event["completion_response"])
+                    if cost is not None:
+                        metrics_data["cost"] = cost
+                        logger.debug("Calculated cost: $%.10f", cost)
+                except Exception as e:
+                    logger.warning("Failed to calculate cost: %s", e)
+
             return StreamEvent(
                 metadata=MetadataEvent(
-                    metrics={
-                        "latencyMs": 0,  # TODO
-                    },
+                    metrics=metrics_data,
                     usage=usage_data,
                 )
             )
@@ -336,7 +348,8 @@ class LiteLLMModel(OpenAIModel):
             _ = event
 
         if event.usage:
-            yield self.format_chunk({"chunk_type": "metadata", "data": event.usage})
+            # Include the full response object for cost calculation
+            yield self.format_chunk({"chunk_type": "metadata", "data": event.usage, "completion_response": event})
 
         logger.debug("finished streaming response from model")
 

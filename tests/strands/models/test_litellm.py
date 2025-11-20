@@ -478,3 +478,42 @@ def test_format_request_messages_cache_point_support():
     ]
 
     assert result == expected
+
+
+@pytest.mark.asyncio
+async def test_stream_with_cost_tracking(litellm_acompletion, api_key, model_id, model, agenerator, alist):
+    """Test that cost is calculated and included in metadata when available."""
+    mock_delta = unittest.mock.Mock(content="Hello", tool_calls=None, reasoning_content=None)
+    mock_event_1 = unittest.mock.Mock(choices=[unittest.mock.Mock(finish_reason=None, delta=mock_delta)])
+    mock_event_2 = unittest.mock.Mock(choices=[unittest.mock.Mock(finish_reason="stop", delta=mock_delta)])
+
+    # Mock final event with usage data
+    mock_event_3 = unittest.mock.Mock()
+    mock_event_3.usage = unittest.mock.Mock()
+    mock_event_3.usage.prompt_tokens = 100
+    mock_event_3.usage.completion_tokens = 50
+    mock_event_3.usage.total_tokens = 150
+    mock_event_3.usage.prompt_tokens_details = None
+
+    litellm_acompletion.side_effect = unittest.mock.AsyncMock(
+        return_value=agenerator([mock_event_1, mock_event_2, mock_event_3])
+    )
+
+    messages = [{"role": "user", "content": [{"text": "Hello"}]}]
+
+    # Mock completion_cost to return a specific value
+    with unittest.mock.patch.object(strands.models.litellm.litellm, "completion_cost", return_value=0.0025):
+        response = model.stream(messages)
+        tru_events = await alist(response)
+
+    # Find the metadata event
+    metadata_event = None
+    for event in tru_events:
+        if "metadata" in event:
+            metadata_event = event["metadata"]
+            break
+
+    assert metadata_event is not None, "No metadata event found"
+    assert "metrics" in metadata_event
+    assert "cost" in metadata_event["metrics"]
+    assert metadata_event["metrics"]["cost"] == 0.0025
