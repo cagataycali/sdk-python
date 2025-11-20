@@ -226,10 +226,12 @@ class AgentTool(ABC):
     """
 
     _is_dynamic: bool
+    _return_direct: bool
 
     def __init__(self) -> None:
         """Initialize the base agent tool with default dynamic state."""
         self._is_dynamic = False
+        self._return_direct = False
 
     @property
     @abstractmethod
@@ -294,6 +296,22 @@ class AgentTool(ABC):
     def mark_dynamic(self) -> None:
         """Mark this tool as dynamically loaded."""
         self._is_dynamic = True
+
+    @property
+    def return_direct(self) -> bool:
+        """Whether the tool result should be returned directly to the user, skipping the LLM.
+
+        When True, the agent event loop will stop after this tool executes and return
+        the tool's result directly, skipping further LLM processing. This is useful for:
+        - Retrieving large data that doesn't need LLM processing
+        - Returning structured data that would be corrupted by the LLM
+        - Reducing latency by skipping unnecessary LLM calls
+        - Saving costs by avoiding token usage for pass-through operations
+
+        Returns:
+            True if tool should return directly, False to continue the agent loop.
+        """
+        return self._return_direct
 
     def get_display_properties(self) -> dict[str, str]:
         """Get properties to display in UI representations of this tool.

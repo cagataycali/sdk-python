@@ -515,11 +515,29 @@ async def _handle_tool_execution(
     if cycle_span:
         tracer.end_event_loop_cycle_span(span=cycle_span, message=message, tool_result_message=tool_result_message)
 
-    if invocation_state["request_state"].get("stop_event_loop", False) or structured_output_context.stop_loop:
+    # Check if any executed tools have return_direct=True
+    return_direct_requested = False
+    for tool_use in tool_uses:
+        tool_name = tool_use.get("name")
+        if tool_name:
+            tool_func = agent.tool_registry.registry.get(tool_name)
+            if tool_func and tool_func.return_direct:
+                return_direct_requested = True
+                logger.debug("tool_name=<%s> | return_direct requested, stopping event loop", tool_name)
+                break
+
+    if (
+        invocation_state["request_state"].get("stop_event_loop", False)
+        or structured_output_context.stop_loop
+        or return_direct_requested
+    ):
         agent.event_loop_metrics.end_cycle(cycle_start_time, cycle_trace)
+        # When return_direct is true, return the tool_result_message instead of the assistant's message
+        # This ensures the user gets the tool results directly
+        final_message = tool_result_message if return_direct_requested else message
         yield EventLoopStopEvent(
             stop_reason,
-            message,
+            final_message,
             agent.event_loop_metrics,
             invocation_state["request_state"],
             structured_output=structured_output_result,

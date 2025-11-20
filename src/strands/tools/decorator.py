@@ -670,6 +670,7 @@ def tool(
     inputSchema: Optional[JSONSchema] = None,
     name: Optional[str] = None,
     context: bool | str = False,
+    return_direct: bool = False,
 ) -> Callable[[Callable[P, R]], DecoratedFunctionTool[P, R]]: ...
 # Suppressing the type error because we want callers to be able to use both `tool` and `tool()` at the
 # call site, but the actual implementation handles that and it's not representable via the type-system
@@ -679,6 +680,7 @@ def tool(  # type: ignore
     inputSchema: Optional[JSONSchema] = None,
     name: Optional[str] = None,
     context: bool | str = False,
+    return_direct: bool = False,
 ) -> Union[DecoratedFunctionTool[P, R], Callable[[Callable[P, R]], DecoratedFunctionTool[P, R]]]:
     """Decorator that transforms a Python function into a Strands tool.
 
@@ -707,6 +709,9 @@ def tool(  # type: ignore
         context: When provided, places an object in the designated parameter. If True, the param name
             defaults to 'tool_context', or if an override is needed, set context equal to a string to designate
             the param name.
+        return_direct: When True, the tool result will be returned directly to the user, skipping further
+            LLM processing. Useful for retrieving large data, structured data, or reducing latency/costs.
+            Defaults to False.
 
     Returns:
         An AgentTool that also mimics the original function when invoked
@@ -767,7 +772,12 @@ def tool(  # type: ignore
         if not isinstance(tool_name, str):
             raise ValueError(f"Tool name must be a string, got {type(tool_name)}")
 
-        return DecoratedFunctionTool(tool_name, tool_spec, f, tool_meta)
+        decorated_tool = DecoratedFunctionTool(tool_name, tool_spec, f, tool_meta)
+
+        # Set return_direct flag
+        decorated_tool._return_direct = return_direct
+
+        return cast(DecoratedFunctionTool[P, R], decorated_tool)
 
     # Handle both @tool and @tool() syntax
     if func is None:
