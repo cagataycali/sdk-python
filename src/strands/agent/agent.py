@@ -163,6 +163,7 @@ class Agent:
                 }
                 tool_results: list[ToolResult] = []
                 invocation_state = kwargs
+                invocation_state["agent"] = self._agent
 
                 async def acall() -> ToolResult:
                     async for event in ToolExecutor._stream(self._agent, tool_use, tool_results, invocation_state):
