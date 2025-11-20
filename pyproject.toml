@@ -106,6 +106,7 @@ dependencies = [
   "ruff>=0.13.0,<0.14.0",
   # Include required pacakge dependencies for mypy
   "strands-agents @ {root:uri}",
+  "pytest>=8.0.0,<9.0.0",
 ]
 
 # Define static-analysis scripts so we can include mypy as part of the linting check
@@ -118,7 +119,7 @@ format-fix = [
 ]
 lint-check = [
     "ruff check",
-    "mypy -p src"
+    "mypy -p src -p tests_integ"
 ]
 lint-fix = [
     "ruff check --fix"
@@ -192,6 +193,23 @@ warn_no_return = true
 warn_unreachable = true
 follow_untyped_imports = true
 ignore_missing_imports = false
+
+[[tool.mypy.overrides]]
+module = "tests_integ.*"
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+disallow_untyped_decorators = false
+ignore_missing_imports = true
+warn_return_any = false
+# Disable strict checking for test code while still catching major issues
+disable_error_code = ["var-annotated", "no-untyped-def", "override", "union-attr", "index", "unreachable", "arg-type", "operator", "typeddict-item", "return", "list-item", "attr-defined"]
+
+[[tool.mypy.overrides]]
+module = "tests.fixtures.*"
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+warn_return_any = false
+disable_error_code = ["var-annotated", "no-untyped-def", "override"]
 
 
 [tool.ruff]
