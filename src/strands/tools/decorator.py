@@ -101,7 +101,16 @@ class FunctionToolMetadata:
         """
         self.func = func
         self.signature = inspect.signature(func)
-        self.type_hints = get_type_hints(func)
+
+        # Try to get resolved type hints, but fall back to empty dict if resolution fails
+        # This can happen when type aliases are defined locally within functions
+        try:
+            self.type_hints = get_type_hints(func)
+        except NameError:
+            # If forward reference resolution fails (e.g., local type aliases),
+            # use empty dict and rely on param.annotation directly
+            self.type_hints = {}
+
         self._context_param = context_param
 
         self._validate_signature()
@@ -117,20 +126,33 @@ class FunctionToolMetadata:
         self.input_model = self._create_input_model()
 
     def _extract_annotated_metadata(
-        self, annotation: Any, param_name: str, param_default: Any
+        self, annotation: Any, param_name: str, param_default: Any, resolved_type: Any
     ) -> tuple[Any, FieldInfo]:
         """Extracts type and a simple string description from an Annotated type hint.
+
+        Args:
+            annotation: The raw annotation from param.annotation (may contain forward refs).
+            param_name: The name of the parameter.
+            param_default: The default value for the parameter.
+            resolved_type: The resolved type from get_type_hints() (forward refs resolved).
 
         Returns:
             A tuple of (actual_type, field_info), where field_info is a new, simple
             Pydantic FieldInfo instance created from the extracted metadata.
         """
-        actual_type = annotation
+        actual_type = resolved_type  # Use resolved type by default
         description: str | None = None
 
         if get_origin(annotation) is Annotated:
             args = get_args(annotation)
-            actual_type = args[0]
+            # For Annotated types, use the resolved version of the inner type
+            # to ensure forward references are resolved (fixes Pydantic 2.12+ compatibility)
+            if get_origin(resolved_type) is Annotated:
+                resolved_args = get_args(resolved_type)
+                actual_type = resolved_args[0]
+            else:
+                # Fallback if resolved type is not Annotated (shouldn't happen normally)
+                actual_type = resolved_type
 
             # Look through metadata for a string description or a FieldInfo object
             for meta in args[1:]:
@@ -201,14 +223,20 @@ class FunctionToolMetadata:
             if self._is_special_parameter(name):
                 continue
 
-            # Use param.annotation directly to get the raw type hint. Using get_type_hints()
-            # can cause inconsistent behavior across Python versions for complex Annotated types.
+            # Get the raw annotation to detect Annotated types consistently
             param_type = param.annotation
             if param_type is inspect.Parameter.empty:
                 param_type = Any
+
+            # Get the resolved type from get_type_hints() to handle forward references
+            # This is essential for Pydantic 2.12+ compatibility with Literal types
+            resolved_type = self.type_hints.get(name, param_type)
+
             default = ... if param.default is inspect.Parameter.empty else param.default
 
-            actual_type, field_info = self._extract_annotated_metadata(param_type, name, default)
+            # Pass both raw and resolved types to handle Annotated metadata extraction
+            # while ensuring forward references are resolved
+            actual_type, field_info = self._extract_annotated_metadata(param_type, name, default, resolved_type)
             field_definitions[name] = (actual_type, field_info)
 
         model_name = f"{self.func.__name__.capitalize()}Tool"
