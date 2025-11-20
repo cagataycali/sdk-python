@@ -86,6 +86,7 @@ class BedrockModel(Model):
             model_id: The Bedrock model ID (e.g., "us.anthropic.claude-sonnet-4-20250514-v1:0")
             include_tool_result_status: Flag to include status field in tool results.
                 True includes status, False removes status, "auto" determines based on model_id. Defaults to "auto".
+            service_tier: Service tier for inference ("priority", "standard", or "flex"). Defaults to None.
             stop_sequences: List of sequences that will stop generation when encountered
             streaming: Flag to enable/disable streaming. Defaults to True.
             temperature: Controls randomness in generation (higher = more random)
@@ -108,6 +109,7 @@ class BedrockModel(Model):
         max_tokens: Optional[int]
         model_id: str
         include_tool_result_status: Optional[Literal["auto"] | bool]
+        service_tier: Optional[Literal["priority", "standard", "flex"]]
         stop_sequences: Optional[list[str]]
         streaming: Optional[bool]
         temperature: Optional[float]
@@ -288,6 +290,11 @@ class BedrockModel(Model):
                 ]
                 if value is not None
             },
+            **(
+                {"performanceConfig": {"latency": self.config["service_tier"]}}
+                if self.config.get("service_tier")
+                else {}
+            ),
             **(
                 self.config["additional_args"]
                 if "additional_args" in self.config and self.config["additional_args"] is not None
@@ -728,6 +735,26 @@ class BedrockModel(Model):
 
         except ClientError as e:
             error_message = str(e)
+
+            # Handle unsupported service tier gracefully
+            if (
+                e.response["Error"]["Code"] == "ValidationException"
+                and "performanceConfig" in error_message
+                and self.config.get("service_tier")
+            ):
+                logger.warning(
+                    "Service tier '%s' is not supported for model '%s'. Retrying without service tier.",
+                    self.config["service_tier"],
+                    self.config["model_id"],
+                )
+                # Retry without service tier
+                original_service_tier = self.config.pop("service_tier")
+                try:
+                    self._stream(callback, messages, tool_specs, system_prompt_content, tool_choice)
+                    return
+                finally:
+                    # Restore the service tier for future calls
+                    self.config["service_tier"] = original_service_tier
 
             if (
                 e.response["Error"]["Code"] == "ThrottlingException"

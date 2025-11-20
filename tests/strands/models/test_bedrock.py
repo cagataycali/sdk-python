@@ -2052,6 +2052,153 @@ def test_format_request_filters_output_schema(model, messages, model_id):
     assert tool_spec["inputSchema"] == {"type": "object", "properties": {}}
 
 
+def test_format_request_with_service_tier_priority(model, messages, model_id):
+    """Test that service_tier priority is included in the request."""
+    model.update_config(service_tier="priority")
+    tru_request = model._format_request(messages)
+    exp_request = {
+        "inferenceConfig": {},
+        "modelId": model_id,
+        "messages": messages,
+        "system": [],
+        "performanceConfig": {"latency": "priority"},
+    }
+
+    assert tru_request == exp_request
+
+
+def test_format_request_with_service_tier_standard(model, messages, model_id):
+    """Test that service_tier standard is included in the request."""
+    model.update_config(service_tier="standard")
+    tru_request = model._format_request(messages)
+    exp_request = {
+        "inferenceConfig": {},
+        "modelId": model_id,
+        "messages": messages,
+        "system": [],
+        "performanceConfig": {"latency": "standard"},
+    }
+
+    assert tru_request == exp_request
+
+
+def test_format_request_with_service_tier_flex(model, messages, model_id):
+    """Test that service_tier flex is included in the request."""
+    model.update_config(service_tier="flex")
+    tru_request = model._format_request(messages)
+    exp_request = {
+        "inferenceConfig": {},
+        "modelId": model_id,
+        "messages": messages,
+        "system": [],
+        "performanceConfig": {"latency": "flex"},
+    }
+
+    assert tru_request == exp_request
+
+
+def test_format_request_without_service_tier(model, messages, model_id):
+    """Test that performanceConfig is not included when service_tier is not set."""
+    tru_request = model._format_request(messages)
+    exp_request = {
+        "inferenceConfig": {},
+        "modelId": model_id,
+        "messages": messages,
+        "system": [],
+    }
+
+    assert tru_request == exp_request
+    assert "performanceConfig" not in tru_request
+
+
+@pytest.mark.asyncio
+async def test_stream_with_unsupported_service_tier_retries_without_it(bedrock_client, model, messages, alist, caplog):
+    """Test that unsupported service_tier triggers warning and retry without service_tier."""
+    import logging
+
+    caplog.set_level(logging.WARNING, logger="strands.models.bedrock")
+
+    # First call with service_tier fails with ValidationException
+    error_response = {
+        "Error": {
+            "Code": "ValidationException",
+            "Message": "performanceConfig is not supported for this model",
+        }
+    }
+    # Second call without service_tier succeeds
+    bedrock_client.converse_stream.side_effect = [
+        ClientError(error_response, "ConversationStream"),
+        {"stream": ["e1", "e2"]},
+    ]
+
+    model.update_config(service_tier="flex")
+    response = model.stream(messages)
+    tru_chunks = await alist(response)
+    exp_chunks = ["e1", "e2"]
+
+    assert tru_chunks == exp_chunks
+
+    # Verify warning was logged
+    assert "Service tier 'flex' is not supported for model 'm1'" in caplog.text
+    assert "Retrying without service tier" in caplog.text
+
+    # Verify two calls were made
+    assert bedrock_client.converse_stream.call_count == 2
+
+    # Verify first call had performanceConfig
+    first_call_args = bedrock_client.converse_stream.call_args_list[0][1]
+    assert "performanceConfig" in first_call_args
+    assert first_call_args["performanceConfig"] == {"latency": "flex"}
+
+    # Verify second call did not have performanceConfig
+    second_call_args = bedrock_client.converse_stream.call_args_list[1][1]
+    assert "performanceConfig" not in second_call_args
+
+
+@pytest.mark.asyncio
+async def test_stream_with_supported_service_tier_works(bedrock_client, model, messages, alist):
+    """Test that supported service_tier works without issues."""
+    bedrock_client.converse_stream.return_value = {"stream": ["e1", "e2"]}
+
+    model.update_config(service_tier="standard")
+    response = model.stream(messages)
+    tru_chunks = await alist(response)
+    exp_chunks = ["e1", "e2"]
+
+    assert tru_chunks == exp_chunks
+
+    # Verify only one call was made
+    assert bedrock_client.converse_stream.call_count == 1
+
+    # Verify call had performanceConfig
+    call_args = bedrock_client.converse_stream.call_args[1]
+    assert "performanceConfig" in call_args
+    assert call_args["performanceConfig"] == {"latency": "standard"}
+
+
+@pytest.mark.asyncio
+async def test_service_tier_config_persists_after_retry(bedrock_client, messages, alist):
+    """Test that service_tier config is restored after retry."""
+    # First call with service_tier fails
+    error_response = {
+        "Error": {
+            "Code": "ValidationException",
+            "Message": "performanceConfig is not supported",
+        }
+    }
+    # Second call without service_tier succeeds
+    bedrock_client.converse_stream.side_effect = [
+        ClientError(error_response, "ConversationStream"),
+        {"stream": ["e1"]},
+    ]
+
+    model = BedrockModel(model_id="test-model", service_tier="priority")
+    await alist(model.stream(messages))
+
+    # Verify service_tier is still in config after retry
+    assert model.get_config()["service_tier"] == "priority"
+
+
 @pytest.mark.asyncio
 async def test_stream_backward_compatibility_system_prompt(bedrock_client, model, messages, alist):
     """Test that system_prompt is converted to system_prompt_content when system_prompt_content is None."""
