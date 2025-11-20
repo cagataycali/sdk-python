@@ -1,5 +1,5 @@
 from typing import cast
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
@@ -637,3 +637,232 @@ def test_summarizing_conversation_manager_generate_summary_with_tools(mock_regis
     summarizing_manager._generate_summary(messages, agent)
 
     mock_registry.register_tool.assert_not_called()
+
+
+# ==================== Async Tests ====================
+
+
+class MockAsyncAgent:
+    """Mock async agent for testing asynchronous summarization."""
+
+    def __init__(self, summary_response="This is an async summary of the conversation."):
+        self.summary_response = summary_response
+        self.system_prompt = None
+        self.messages = []
+        self.model = Mock()
+        self.call_tracker = Mock()
+        self.tool_registry = Mock()
+        self.tool_names = []
+
+    async def invoke_async(self, prompt):
+        """Mock async agent invoke that returns a summary."""
+        self.call_tracker(prompt)
+        result = Mock()
+        result.message = {"role": "assistant", "content": [{"text": self.summary_response}]}
+        return result
+
+
+def create_mock_async_agent(summary_response="This is an async summary of the conversation.") -> "Agent":
+    """Factory function that returns a properly typed MockAsyncAgent."""
+    return cast("Agent", MockAsyncAgent(summary_response))
+
+
+@pytest.fixture
+def mock_async_agent():
+    """Fixture for mock async agent."""
+    return create_mock_async_agent()
+
+
+@pytest.mark.asyncio
+async def test_areduce_context_with_summarization(summarizing_manager, mock_async_agent):
+    """Test async reduce_context with summarization enabled."""
+    test_messages: Messages = [
+        {"role": "user", "content": [{"text": "Message 1"}]},
+        {"role": "assistant", "content": [{"text": "Response 1"}]},
+        {"role": "user", "content": [{"text": "Message 2"}]},
+        {"role": "assistant", "content": [{"text": "Response 2"}]},
+        {"role": "user", "content": [{"text": "Message 3"}]},
+        {"role": "assistant", "content": [{"text": "Response 3"}]},
+    ]
+    mock_async_agent.messages = test_messages
+
+    await summarizing_manager.areduce_context(mock_async_agent)
+
+    # Should have: 1 summary message + 2 preserved recent messages + remaining from summarization
+    assert len(mock_async_agent.messages) == 4
+
+    # First message should be the summary
+    assert mock_async_agent.messages[0]["role"] == "user"
+    first_content = mock_async_agent.messages[0]["content"][0]
+    assert "text" in first_content and "This is an async summary of the conversation." in first_content["text"]
+
+    # Recent messages should be preserved
+    assert "Message 3" in str(mock_async_agent.messages[-2]["content"])
+    assert "Response 3" in str(mock_async_agent.messages[-1]["content"])
+
+
+@pytest.mark.asyncio
+async def test_areduce_context_too_few_messages_raises_exception(summarizing_manager, mock_async_agent):
+    """Test that async reduce_context raises exception when there are too few messages."""
+    manager = SummarizingConversationManager(
+        summary_ratio=0.1,  # Very small ratio
+        preserve_recent_messages=5,  # High preservation
+    )
+
+    insufficient_test_messages: Messages = [
+        {"role": "user", "content": [{"text": "Message 1"}]},
+        {"role": "assistant", "content": [{"text": "Response 1"}]},
+        {"role": "user", "content": [{"text": "Message 2"}]},
+    ]
+    mock_async_agent.messages = insufficient_test_messages
+
+    with pytest.raises(ContextWindowOverflowException, match="insufficient messages for summarization"):
+        await manager.areduce_context(mock_async_agent)
+
+
+@pytest.mark.asyncio
+async def test_agenerate_summary(summarizing_manager, mock_async_agent):
+    """Test the async _agenerate_summary method."""
+    test_messages: Messages = [
+        {"role": "user", "content": [{"text": "Hello"}]},
+        {"role": "assistant", "content": [{"text": "Hi there"}]},
+    ]
+
+    summary = await summarizing_manager._agenerate_summary(test_messages, mock_async_agent)
+
+    summary_content = summary["content"][0]
+    assert "text" in summary_content and summary_content["text"] == "This is an async summary of the conversation."
+
+
+@pytest.mark.asyncio
+async def test_agenerate_summary_raises_on_agent_failure():
+    """Test that async _agenerate_summary raises exception when agent fails."""
+    failing_agent = Mock()
+    failing_agent.invoke_async = AsyncMock(side_effect=Exception("Async agent failed"))
+    failing_agent.system_prompt = None
+    empty_failing_messages: Messages = []
+    failing_agent.messages = empty_failing_messages
+    failing_agent.tool_registry = Mock()
+    failing_agent.tool_names = []
+
+    manager = SummarizingConversationManager()
+
+    messages: Messages = [
+        {"role": "user", "content": [{"text": "Hello"}]},
+        {"role": "assistant", "content": [{"text": "Hi there"}]},
+    ]
+
+    # Should raise the exception from the agent
+    with pytest.raises(Exception, match="Async agent failed"):
+        await manager._agenerate_summary(messages, failing_agent)
+
+
+@pytest.mark.asyncio
+async def test_async_agent_state_restoration():
+    """Test that agent state is properly restored after async summarization."""
+    manager = SummarizingConversationManager()
+    mock_async_agent = create_mock_async_agent()
+
+    # Set initial state
+    original_system_prompt = "Original system prompt"
+    original_messages: Messages = [{"role": "user", "content": [{"text": "Original message"}]}]
+    mock_async_agent.system_prompt = original_system_prompt
+    mock_async_agent.messages = original_messages.copy()
+
+    messages: Messages = [
+        {"role": "user", "content": [{"text": "Hello"}]},
+        {"role": "assistant", "content": [{"text": "Hi there"}]},
+    ]
+
+    await manager._agenerate_summary(messages, mock_async_agent)
+
+    # State should be restored
+    assert mock_async_agent.system_prompt == original_system_prompt
+    assert mock_async_agent.messages == original_messages
+
+
+@pytest.mark.asyncio
+async def test_async_agent_state_restoration_on_exception():
+    """Test that agent state is restored even when async summarization fails."""
+    manager = SummarizingConversationManager()
+
+    # Create an agent that fails during summarization
+    mock_async_agent = Mock()
+    mock_async_agent.system_prompt = "Original prompt"
+    agent_messages: Messages = [{"role": "user", "content": [{"text": "Original"}]}]
+    mock_async_agent.messages = agent_messages
+    mock_async_agent.tool_registry = Mock()
+    mock_async_agent.tool_names = []
+    mock_async_agent.invoke_async = AsyncMock(side_effect=Exception("Async summarization failed"))
+
+    messages: Messages = [
+        {"role": "user", "content": [{"text": "Hello"}]},
+        {"role": "assistant", "content": [{"text": "Hi there"}]},
+    ]
+
+    # Should restore state even on exception
+    with pytest.raises(Exception, match="Async summarization failed"):
+        await manager._agenerate_summary(messages, mock_async_agent)
+
+    # State should still be restored
+    assert mock_async_agent.system_prompt == "Original prompt"
+
+
+@pytest.mark.asyncio
+async def test_uses_async_summarization_agent_when_provided():
+    """Test that async summarization_agent is used when provided."""
+    summary_agent = create_mock_async_agent("Custom async summary from dedicated agent")
+    manager = SummarizingConversationManager(summarization_agent=summary_agent)
+
+    messages: Messages = [
+        {"role": "user", "content": [{"text": "Hello"}]},
+        {"role": "assistant", "content": [{"text": "Hi there"}]},
+    ]
+
+    parent_agent = create_mock_async_agent("Parent agent async summary")
+    summary = await manager._agenerate_summary(messages, parent_agent)
+
+    # Should use the dedicated summarization agent, not the parent agent
+    summary_content = summary["content"][0]
+    assert "text" in summary_content and summary_content["text"] == "Custom async summary from dedicated agent"
+
+    # Assert that the summarization agent was called
+    summary_agent.call_tracker.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_uses_async_parent_agent_when_no_summarization_agent():
+    """Test that parent agent is used asynchronously when no summarization_agent is provided."""
+    manager = SummarizingConversationManager()
+
+    messages: Messages = [
+        {"role": "user", "content": [{"text": "Hello"}]},
+        {"role": "assistant", "content": [{"text": "Hi there"}]},
+    ]
+
+    parent_agent = create_mock_async_agent("Parent agent async summary")
+    summary = await manager._agenerate_summary(messages, parent_agent)
+
+    # Should use the parent agent
+    summary_content = summary["content"][0]
+    assert "text" in summary_content and summary_content["text"] == "Parent agent async summary"
+
+    # Assert that the parent agent was called
+    parent_agent.call_tracker.assert_called_once()
+
+
+@pytest.mark.asyncio
+@patch("strands.agent.conversation_manager.summarizing_conversation_manager.ToolRegistry")
+async def test_async_summarizing_conversation_manager_generate_summary_with_noop_tool(
+    mock_registry_cls, summarizing_manager
+):
+    mock_registry = mock_registry_cls.return_value
+
+    messages = [{"role": "user", "content": [{"text": "test"}]}]
+    agent = create_mock_async_agent()
+
+    original_tool_registry = agent.tool_registry
+    await summarizing_manager._agenerate_summary(messages, agent)
+
+    assert original_tool_registry == agent.tool_registry
+    mock_registry.register_tool.assert_called_once()

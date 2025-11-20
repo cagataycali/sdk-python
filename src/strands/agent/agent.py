@@ -794,7 +794,7 @@ class Agent:
 
         except ContextWindowOverflowException as e:
             # Try reducing the context size and retrying
-            self.conversation_manager.reduce_context(self, e=e)
+            await self.conversation_manager.areduce_context(self, e=e)
 
             # Sync agent after reduce_context to keep conversation_manager_state up to date in the session
             if self._session_manager:

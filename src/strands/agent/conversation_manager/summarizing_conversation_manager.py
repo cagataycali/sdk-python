@@ -265,3 +265,110 @@ class SummarizingConversationManager(ConversationManager):
             raise ContextWindowOverflowException("Unable to trim conversation context!")
 
         return split_point
+
+    @override
+    async def areduce_context(self, agent: "Agent", e: Optional[Exception] = None, **kwargs: Any) -> None:
+        """Async version of reduce_context using asynchronous summarization.
+
+        This method provides non-blocking context reduction by making LLM calls for summarization
+        asynchronously, preventing thread blocking during long-running summarization operations.
+
+        Args:
+            agent: The agent whose conversation history will be reduced.
+                The agent's messages list is modified in-place.
+            e: The exception that triggered the context reduction, if any.
+            **kwargs: Additional keyword arguments for future extensibility.
+
+        Raises:
+            ContextWindowOverflowException: If the context cannot be summarized.
+        """
+        try:
+            # Calculate how many messages to summarize
+            messages_to_summarize_count = max(1, int(len(agent.messages) * self.summary_ratio))
+
+            # Ensure we don't summarize recent messages
+            messages_to_summarize_count = min(
+                messages_to_summarize_count, len(agent.messages) - self.preserve_recent_messages
+            )
+
+            if messages_to_summarize_count <= 0:
+                raise ContextWindowOverflowException("Cannot summarize: insufficient messages for summarization")
+
+            # Adjust split point to avoid breaking ToolUse/ToolResult pairs
+            messages_to_summarize_count = self._adjust_split_point_for_tool_pairs(
+                agent.messages, messages_to_summarize_count
+            )
+
+            if messages_to_summarize_count <= 0:
+                raise ContextWindowOverflowException("Cannot summarize: insufficient messages for summarization")
+
+            # Extract messages to summarize
+            messages_to_summarize = agent.messages[:messages_to_summarize_count]
+            remaining_messages = agent.messages[messages_to_summarize_count:]
+
+            # Keep track of the number of messages that have been summarized thus far.
+            self.removed_message_count += len(messages_to_summarize)
+            # If there is a summary message, don't count it in the removed_message_count.
+            if self._summary_message:
+                self.removed_message_count -= 1
+
+            # Generate summary asynchronously
+            self._summary_message = await self._agenerate_summary(messages_to_summarize, agent)
+
+            # Replace the summarized messages with the summary
+            agent.messages[:] = [self._summary_message] + remaining_messages
+
+        except Exception as summarization_error:
+            logger.error("Summarization failed: %s", summarization_error)
+            raise summarization_error from e
+
+    async def _agenerate_summary(self, messages: List[Message], agent: "Agent") -> Message:
+        """Async version of summary generation using asynchronous agent calls.
+
+        Args:
+            messages: The messages to summarize.
+            agent: The agent instance to use for summarization.
+
+        Returns:
+            A message containing the conversation summary.
+
+        Raises:
+            Exception: If summary generation fails.
+        """
+        # Choose which agent to use for summarization
+        summarization_agent = self.summarization_agent if self.summarization_agent is not None else agent
+
+        # Save original system prompt, messages, and tool registry to restore later
+        original_system_prompt = summarization_agent.system_prompt
+        original_messages = summarization_agent.messages.copy()
+        original_tool_registry = summarization_agent.tool_registry
+
+        try:
+            # Only override system prompt if no agent was provided during initialization
+            if self.summarization_agent is None:
+                # Use custom system prompt if provided, otherwise use default
+                system_prompt = (
+                    self.summarization_system_prompt
+                    if self.summarization_system_prompt is not None
+                    else DEFAULT_SUMMARIZATION_PROMPT
+                )
+                # Temporarily set the system prompt for summarization
+                summarization_agent.system_prompt = system_prompt
+
+            # Add no-op tool if agent has no tools to satisfy tool spec requirement
+            if not summarization_agent.tool_names:
+                tool_registry = ToolRegistry()
+                tool_registry.register_tool(cast(AgentTool, noop_tool))
+                summarization_agent.tool_registry = tool_registry
+
+            summarization_agent.messages = messages
+
+            # Use the agent to generate summary asynchronously with rich content (can use tools if needed)
+            result = await summarization_agent.invoke_async("Please summarize this conversation.")
+            return cast(Message, {**result.message, "role": "user"})
+
+        finally:
+            # Restore original agent state
+            summarization_agent.system_prompt = original_system_prompt
+            summarization_agent.messages = original_messages
+            summarization_agent.tool_registry = original_tool_registry

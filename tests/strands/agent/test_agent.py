@@ -492,7 +492,7 @@ def test_agent__call__retry_with_reduced_context(mock_model, agent, tool, agener
         system_prompt_content=unittest.mock.ANY,
     )
 
-    conversation_manager_spy.reduce_context.assert_called_once()
+    conversation_manager_spy.areduce_context.assert_called_once()
     assert conversation_manager_spy.apply_management.call_count == 1
 
 
@@ -518,7 +518,7 @@ def test_agent__call__always_sliding_window_conversation_manager_doesnt_infinite
     with pytest.raises(ContextWindowOverflowException):
         agent("Test!")
 
-    assert conversation_manager_spy.reduce_context.call_count > 0
+    assert conversation_manager_spy.areduce_context.call_count > 0
     assert conversation_manager_spy.apply_management.call_count == 1
 
 
@@ -637,7 +637,7 @@ def test_agent__call__retry_with_overwritten_tool(mock_model, agent, tool, agene
         system_prompt_content=unittest.mock.ANY,
     )
 
-    assert conversation_manager_spy.reduce_context.call_count == 2
+    assert conversation_manager_spy.areduce_context.call_count == 2
     assert conversation_manager_spy.apply_management.call_count == 1
 
 

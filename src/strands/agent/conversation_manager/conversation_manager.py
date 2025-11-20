@@ -1,5 +1,6 @@
 """Abstract interface for conversation history management."""
 
+import asyncio
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -86,3 +87,25 @@ class ConversationManager(ABC):
             **kwargs: Additional keyword arguments for future extensibility.
         """
         pass
+
+    async def areduce_context(self, agent: "Agent", e: Optional[Exception] = None, **kwargs: Any) -> None:
+        """Async version of reduce_context for non-blocking context reduction.
+
+        This method provides an asynchronous interface for reducing context, allowing implementations
+        to perform I/O-bound operations (like LLM calls for summarization) without blocking the event loop.
+
+        The default implementation calls the synchronous reduce_context method in a thread pool executor
+        to maintain backward compatibility.
+
+        Implementations can override this method to provide truly asynchronous context reduction,
+        particularly useful when making LLM calls for conversation summarization.
+
+        Args:
+            agent: The agent whose conversation history will be reduced.
+                This list is modified in-place.
+            e: The exception that triggered the context reduction, if any.
+            **kwargs: Additional keyword arguments for future extensibility.
+        """
+        # Default implementation: run sync version in executor
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, lambda: self.reduce_context(agent, e, **kwargs))
