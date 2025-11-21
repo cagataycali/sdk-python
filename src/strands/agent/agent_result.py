@@ -51,6 +51,91 @@ class AgentResult:
                 result += item.get("text", "") + "\n"
         return result
 
+    def get_tool_executions(self) -> list[dict[str, Any]]:
+        """Extract all tool execution details from metrics.
+
+        This convenience method makes tool execution information easily accessible
+        without requiring users to navigate the nested metrics structure.
+
+        Returns:
+            List of dictionaries containing tool execution details, where each dict has:
+            - name: Tool name
+            - tool_use_id: Unique identifier for this tool invocation
+            - input: Tool input parameters
+            - call_count: Number of times this tool was called
+            - success_count: Number of successful calls
+            - error_count: Number of failed calls
+            - total_time: Total execution time in seconds
+
+        Example:
+            >>> result = agent("Calculate 5 + 3")
+            >>> executions = result.get_tool_executions()
+            >>> for execution in executions:
+            ...     print(f"Tool: {execution['name']}")
+            ...     print(f"Input: {execution['input']}")
+        """
+        executions = []
+        for tool_name, tool_metrics in self.metrics.tool_metrics.items():
+            execution_info: dict[str, Any] = {
+                "name": tool_name,
+                "tool_use_id": tool_metrics.tool.get("toolUseId", "unknown"),
+                "input": tool_metrics.tool.get("input", {}),
+                "call_count": tool_metrics.call_count,
+                "success_count": tool_metrics.success_count,
+                "error_count": tool_metrics.error_count,
+                "total_time": tool_metrics.total_time,
+            }
+            executions.append(execution_info)
+        return executions
+
+    def get_tool_inputs(self) -> dict[str, Any]:
+        """Get input parameters for all executed tools.
+
+        This is a simpler alternative to get_tool_executions() when you only
+        need the input parameters, not the full execution details.
+
+        Returns:
+            Dictionary mapping tool names to their input parameters.
+
+        Example:
+            >>> result = agent("Calculate 5 + 3")
+            >>> inputs = result.get_tool_inputs()
+            >>> print(inputs.get("calculator"))
+        """
+        return {
+            tool_name: tool_metrics.tool.get("input", {})
+            for tool_name, tool_metrics in self.metrics.tool_metrics.items()
+        }
+
+    def get_executed_code(self) -> str | None:
+        r"""Convenience method to extract executed code from code_interpreter tool.
+
+        This method is specifically designed for the code_interpreter tool,
+        providing direct access to the executed Python code without navigating
+        the nested data structure.
+
+        Returns:
+            The executed Python code as a string, or None if code_interpreter
+            was not used or no code was found.
+
+        Example:
+            >>> result = agent("Calculate average of [1, 2, 3, 4, 5]")
+            >>> code = result.get_executed_code()
+            >>> if code:
+            ...     print(f"Executed code:\n{code}")
+        """
+        code_interpreter_metrics = self.metrics.tool_metrics.get("code_interpreter")
+        if not code_interpreter_metrics:
+            return None
+
+        try:
+            tool_input: Any = code_interpreter_metrics.tool.get("input", {})
+            action: Any = tool_input.get("code_interpreter_input", {}).get("action", {})
+            code: str | None = action.get("code")
+            return code
+        except (AttributeError, KeyError):
+            return None
+
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "AgentResult":
         """Rehydrate an AgentResult from persisted JSON.

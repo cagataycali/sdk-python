@@ -201,3 +201,191 @@ def test__str__with_structured_output(mock_metrics, simple_message: Message):
     assert message_string == "Hello world!\n"
     assert "test" not in message_string
     assert "42" not in message_string
+
+
+# Tests for tool execution helper methods
+def test_get_tool_executions_with_tools(simple_message: Message):
+    """Test that get_tool_executions() returns tool execution details."""
+    from strands.telemetry.metrics import EventLoopMetrics, ToolMetrics
+
+    metrics = EventLoopMetrics()
+    # Add mock tool metrics
+    metrics.tool_metrics["calculator"] = ToolMetrics(
+        tool={
+            "toolUseId": "tool_123",
+            "name": "calculator",
+            "input": {"expression": "5 + 3"},
+        },
+        call_count=1,
+        success_count=1,
+        error_count=0,
+        total_time=0.5,
+    )
+    metrics.tool_metrics["code_interpreter"] = ToolMetrics(
+        tool={
+            "toolUseId": "tool_456",
+            "name": "code_interpreter",
+            "input": {
+                "code_interpreter_input": {
+                    "action": {
+                        "type": "executeCode",
+                        "language": "python",
+                        "code": "print('hello')",
+                    }
+                }
+            },
+        },
+        call_count=2,
+        success_count=2,
+        error_count=0,
+        total_time=1.2,
+    )
+
+    result = AgentResult(stop_reason="end_turn", message=simple_message, metrics=metrics, state={})
+
+    executions = result.get_tool_executions()
+
+    assert len(executions) == 2
+
+    # Check calculator execution
+    calc_execution = next(e for e in executions if e["name"] == "calculator")
+    assert calc_execution["tool_use_id"] == "tool_123"
+    assert calc_execution["input"] == {"expression": "5 + 3"}
+    assert calc_execution["call_count"] == 1
+    assert calc_execution["success_count"] == 1
+    assert calc_execution["error_count"] == 0
+    assert calc_execution["total_time"] == 0.5
+
+    # Check code_interpreter execution
+    ci_execution = next(e for e in executions if e["name"] == "code_interpreter")
+    assert ci_execution["tool_use_id"] == "tool_456"
+    assert "code_interpreter_input" in ci_execution["input"]
+    assert ci_execution["call_count"] == 2
+    assert ci_execution["success_count"] == 2
+
+
+def test_get_tool_executions_empty(simple_message: Message):
+    """Test that get_tool_executions() returns empty list when no tools used."""
+    metrics = EventLoopMetrics()
+
+    result = AgentResult(stop_reason="end_turn", message=simple_message, metrics=metrics, state={})
+
+    executions = result.get_tool_executions()
+
+    assert executions == []
+
+
+def test_get_tool_inputs_with_tools(simple_message: Message):
+    """Test that get_tool_inputs() returns tool input parameters."""
+    from strands.telemetry.metrics import EventLoopMetrics, ToolMetrics
+
+    metrics = EventLoopMetrics()
+    metrics.tool_metrics["calculator"] = ToolMetrics(
+        tool={
+            "toolUseId": "tool_123",
+            "name": "calculator",
+            "input": {"expression": "10 * 20"},
+        }
+    )
+
+    result = AgentResult(stop_reason="end_turn", message=simple_message, metrics=metrics, state={})
+
+    inputs = result.get_tool_inputs()
+
+    assert len(inputs) == 1
+    assert "calculator" in inputs
+    assert inputs["calculator"] == {"expression": "10 * 20"}
+
+
+def test_get_tool_inputs_empty(simple_message: Message):
+    """Test that get_tool_inputs() returns empty dict when no tools used."""
+    metrics = EventLoopMetrics()
+
+    result = AgentResult(stop_reason="end_turn", message=simple_message, metrics=metrics, state={})
+
+    inputs = result.get_tool_inputs()
+
+    assert inputs == {}
+
+
+def test_get_executed_code_with_code(simple_message: Message):
+    """Test that get_executed_code() extracts code from code_interpreter tool."""
+    from strands.telemetry.metrics import EventLoopMetrics, ToolMetrics
+
+    metrics = EventLoopMetrics()
+    test_code = "import numpy as np\nresult = np.mean([1, 2, 3, 4, 5])"
+    metrics.tool_metrics["code_interpreter"] = ToolMetrics(
+        tool={
+            "toolUseId": "tool_789",
+            "name": "code_interpreter",
+            "input": {
+                "code_interpreter_input": {
+                    "action": {
+                        "type": "executeCode",
+                        "language": "python",
+                        "code": test_code,
+                    }
+                }
+            },
+        }
+    )
+
+    result = AgentResult(stop_reason="end_turn", message=simple_message, metrics=metrics, state={})
+
+    code = result.get_executed_code()
+
+    assert code == test_code
+
+
+def test_get_executed_code_no_code_interpreter(simple_message: Message):
+    """Test that get_executed_code() returns None when code_interpreter not used."""
+    from strands.telemetry.metrics import EventLoopMetrics, ToolMetrics
+
+    metrics = EventLoopMetrics()
+    # Add different tool, not code_interpreter
+    metrics.tool_metrics["calculator"] = ToolMetrics(
+        tool={
+            "toolUseId": "tool_123",
+            "name": "calculator",
+            "input": {"expression": "5 + 3"},
+        }
+    )
+
+    result = AgentResult(stop_reason="end_turn", message=simple_message, metrics=metrics, state={})
+
+    code = result.get_executed_code()
+
+    assert code is None
+
+
+def test_get_executed_code_empty_metrics(simple_message: Message):
+    """Test that get_executed_code() returns None when no tools used."""
+    metrics = EventLoopMetrics()
+
+    result = AgentResult(stop_reason="end_turn", message=simple_message, metrics=metrics, state={})
+
+    code = result.get_executed_code()
+
+    assert code is None
+
+
+def test_get_executed_code_malformed_input(simple_message: Message):
+    """Test that get_executed_code() handles malformed input gracefully."""
+    from strands.telemetry.metrics import EventLoopMetrics, ToolMetrics
+
+    metrics = EventLoopMetrics()
+    # Create code_interpreter with malformed input structure
+    metrics.tool_metrics["code_interpreter"] = ToolMetrics(
+        tool={
+            "toolUseId": "tool_999",
+            "name": "code_interpreter",
+            "input": {"malformed": "structure"},  # Missing expected nested structure
+        }
+    )
+
+    result = AgentResult(stop_reason="end_turn", message=simple_message, metrics=metrics, state={})
+
+    code = result.get_executed_code()
+
+    # Should return None rather than raising an exception
+    assert code is None
