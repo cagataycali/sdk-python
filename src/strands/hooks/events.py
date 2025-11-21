@@ -17,7 +17,7 @@ from .registry import HookEvent
 
 
 @dataclass
-class AgentInitializedEvent(HookEvent):
+class AgentInitializedEvent(HookEvent, _Interruptible):
     """Event triggered when an agent has finished initialization.
 
     This event is fired after the agent has been fully constructed and all
@@ -25,11 +25,21 @@ class AgentInitializedEvent(HookEvent):
     event to perform setup tasks that require a fully initialized agent.
     """
 
-    pass
+    @override
+    def _interrupt_id(self, name: str) -> str:
+        """Unique id for the interrupt.
+
+        Args:
+            name: User defined name for the interrupt.
+
+        Returns:
+            Interrupt id.
+        """
+        return f"v1:agent_initialized:{id(self.agent)}:{uuid.uuid5(uuid.NAMESPACE_OID, name)}"
 
 
 @dataclass
-class BeforeInvocationEvent(HookEvent):
+class BeforeInvocationEvent(HookEvent, _Interruptible):
     """Event triggered at the beginning of a new agent request.
 
     This event is fired before the agent begins processing a new user request,
@@ -42,11 +52,21 @@ class BeforeInvocationEvent(HookEvent):
       - Agent.structured_output
     """
 
-    pass
+    @override
+    def _interrupt_id(self, name: str) -> str:
+        """Unique id for the interrupt.
+
+        Args:
+            name: User defined name for the interrupt.
+
+        Returns:
+            Interrupt id.
+        """
+        return f"v1:before_invocation:{id(self.agent)}:{uuid.uuid5(uuid.NAMESPACE_OID, name)}"
 
 
 @dataclass
-class AfterInvocationEvent(HookEvent):
+class AfterInvocationEvent(HookEvent, _Interruptible):
     """Event triggered at the end of an agent request.
 
     This event is fired after the agent has completed processing a request,
@@ -67,9 +87,21 @@ class AfterInvocationEvent(HookEvent):
         """True to invoke callbacks in reverse order."""
         return True
 
+    @override
+    def _interrupt_id(self, name: str) -> str:
+        """Unique id for the interrupt.
+
+        Args:
+            name: User defined name for the interrupt.
+
+        Returns:
+            Interrupt id.
+        """
+        return f"v1:after_invocation:{id(self.agent)}:{uuid.uuid5(uuid.NAMESPACE_OID, name)}"
+
 
 @dataclass
-class MessageAddedEvent(HookEvent):
+class MessageAddedEvent(HookEvent, _Interruptible):
     """Event triggered when a message is added to the agent's conversation.
 
     This event is fired whenever the agent adds a new message to its internal
@@ -85,6 +117,18 @@ class MessageAddedEvent(HookEvent):
     """
 
     message: Message
+
+    @override
+    def _interrupt_id(self, name: str) -> str:
+        """Unique id for the interrupt.
+
+        Args:
+            name: User defined name for the interrupt.
+
+        Returns:
+            Interrupt id.
+        """
+        return f"v1:message_added:{id(self.agent)}:{uuid.uuid5(uuid.NAMESPACE_OID, name)}"
 
 
 @dataclass
@@ -128,7 +172,7 @@ class BeforeToolCallEvent(HookEvent, _Interruptible):
 
 
 @dataclass
-class AfterToolCallEvent(HookEvent):
+class AfterToolCallEvent(HookEvent, _Interruptible):
     """Event triggered after a tool invocation completes.
 
     This event is fired after the agent has finished executing a tool,
@@ -162,9 +206,21 @@ class AfterToolCallEvent(HookEvent):
         """True to invoke callbacks in reverse order."""
         return True
 
+    @override
+    def _interrupt_id(self, name: str) -> str:
+        """Unique id for the interrupt.
+
+        Args:
+            name: User defined name for the interrupt.
+
+        Returns:
+            Interrupt id.
+        """
+        return f"v1:after_tool_call:{self.tool_use['toolUseId']}:{uuid.uuid5(uuid.NAMESPACE_OID, name)}"
+
 
 @dataclass
-class BeforeModelCallEvent(HookEvent):
+class BeforeModelCallEvent(HookEvent, _Interruptible):
     """Event triggered before the model is invoked.
 
     This event is fired just before the agent calls the model for inference,
@@ -174,11 +230,21 @@ class BeforeModelCallEvent(HookEvent):
     Note: This event is not fired for invocations to structured_output.
     """
 
-    pass
+    @override
+    def _interrupt_id(self, name: str) -> str:
+        """Unique id for the interrupt.
+
+        Args:
+            name: User defined name for the interrupt.
+
+        Returns:
+            Interrupt id.
+        """
+        return f"v1:before_model_call:{id(self.agent)}:{uuid.uuid5(uuid.NAMESPACE_OID, name)}"
 
 
 @dataclass
-class AfterModelCallEvent(HookEvent):
+class AfterModelCallEvent(HookEvent, _Interruptible):
     """Event triggered after the model invocation completes.
 
     This event is fired after the agent has finished calling the model,
@@ -214,3 +280,15 @@ class AfterModelCallEvent(HookEvent):
     def should_reverse_callbacks(self) -> bool:
         """True to invoke callbacks in reverse order."""
         return True
+
+    @override
+    def _interrupt_id(self, name: str) -> str:
+        """Unique id for the interrupt.
+
+        Args:
+            name: User defined name for the interrupt.
+
+        Returns:
+            Interrupt id.
+        """
+        return f"v1:after_model_call:{id(self.agent)}:{uuid.uuid5(uuid.NAMESPACE_OID, name)}"

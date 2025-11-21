@@ -109,7 +109,7 @@ class ToolExecutor(abc.ABC):
                 "status": "error",
                 "content": [{"text": cancel_message}],
             }
-            after_event, _ = await agent.hooks.invoke_callbacks_async(
+            after_event, interrupts = await agent.hooks.invoke_callbacks_async(
                 AfterToolCallEvent(
                     agent=agent,
                     tool_use=tool_use,
@@ -119,6 +119,11 @@ class ToolExecutor(abc.ABC):
                     cancel_message=cancel_message,
                 )
             )
+
+            if interrupts:
+                yield ToolInterruptEvent(tool_use, interrupts)
+                return
+
             yield ToolResultEvent(after_event.result)
             tool_results.append(after_event.result)
             return
@@ -147,7 +152,7 @@ class ToolExecutor(abc.ABC):
                     "status": "error",
                     "content": [{"text": f"Unknown tool: {tool_name}"}],
                 }
-                after_event, _ = await agent.hooks.invoke_callbacks_async(
+                after_event, interrupts = await agent.hooks.invoke_callbacks_async(
                     AfterToolCallEvent(
                         agent=agent,
                         selected_tool=selected_tool,
@@ -156,6 +161,11 @@ class ToolExecutor(abc.ABC):
                         result=result,
                     )
                 )
+
+                if interrupts:
+                    yield ToolInterruptEvent(tool_use, interrupts)
+                    return
+
                 yield ToolResultEvent(after_event.result)
                 tool_results.append(after_event.result)
                 return
@@ -184,7 +194,7 @@ class ToolExecutor(abc.ABC):
 
             result = cast(ToolResult, event)
 
-            after_event, _ = await agent.hooks.invoke_callbacks_async(
+            after_event, interrupts = await agent.hooks.invoke_callbacks_async(
                 AfterToolCallEvent(
                     agent=agent,
                     selected_tool=selected_tool,
@@ -193,6 +203,10 @@ class ToolExecutor(abc.ABC):
                     result=result,
                 )
             )
+
+            if interrupts:
+                yield ToolInterruptEvent(tool_use, interrupts)
+                return
 
             yield ToolResultEvent(after_event.result)
             tool_results.append(after_event.result)
@@ -204,7 +218,7 @@ class ToolExecutor(abc.ABC):
                 "status": "error",
                 "content": [{"text": f"Error: {str(e)}"}],
             }
-            after_event, _ = await agent.hooks.invoke_callbacks_async(
+            after_event, interrupts = await agent.hooks.invoke_callbacks_async(
                 AfterToolCallEvent(
                     agent=agent,
                     selected_tool=selected_tool,
@@ -214,6 +228,11 @@ class ToolExecutor(abc.ABC):
                     exception=e,
                 )
             )
+
+            if interrupts:
+                yield ToolInterruptEvent(tool_use, interrupts)
+                return
+
             yield ToolResultEvent(after_event.result)
             tool_results.append(after_event.result)
 
