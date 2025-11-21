@@ -2,6 +2,7 @@
 
 import json
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, cast
 
 import boto3
@@ -50,6 +51,7 @@ class S3SessionManager(RepositorySessionManager, SessionRepository):
         boto_session: Optional[boto3.Session] = None,
         boto_client_config: Optional[BotocoreConfig] = None,
         region_name: Optional[str] = None,
+        s3_client: Optional[Any] = None,
         **kwargs: Any,
     ):
         """Initialize S3SessionManager with S3 storage.
@@ -62,26 +64,32 @@ class S3SessionManager(RepositorySessionManager, SessionRepository):
             boto_session: Optional boto3 session
             boto_client_config: Optional boto3 client configuration
             region_name: AWS region for S3 storage
+            s3_client: Optional pre-configured S3 client. If provided, boto_session,
+                boto_client_config, and region_name are ignored.
             **kwargs: Additional keyword arguments for future extensibility.
         """
         self.bucket = bucket
         self.prefix = prefix
 
-        session = boto_session or boto3.Session(region_name=region_name)
-
-        # Add strands-agents to the request user agent
-        if boto_client_config:
-            existing_user_agent = getattr(boto_client_config, "user_agent_extra", None)
-            # Append 'strands-agents' to existing user_agent_extra or set it if not present
-            if existing_user_agent:
-                new_user_agent = f"{existing_user_agent} strands-agents"
-            else:
-                new_user_agent = "strands-agents"
-            client_config = boto_client_config.merge(BotocoreConfig(user_agent_extra=new_user_agent))
+        # Use provided client or create a new one
+        if s3_client is not None:
+            self.client = s3_client
         else:
-            client_config = BotocoreConfig(user_agent_extra="strands-agents")
+            session = boto_session or boto3.Session(region_name=region_name)
 
-        self.client = session.client(service_name="s3", config=client_config)
+            # Add strands-agents to the request user agent
+            if boto_client_config:
+                existing_user_agent = getattr(boto_client_config, "user_agent_extra", None)
+                # Append 'strands-agents' to existing user_agent_extra or set it if not present
+                if existing_user_agent:
+                    new_user_agent = f"{existing_user_agent} strands-agents"
+                else:
+                    new_user_agent = "strands-agents"
+                client_config = boto_client_config.merge(BotocoreConfig(user_agent_extra=new_user_agent))
+            else:
+                client_config = BotocoreConfig(user_agent_extra="strands-agents")
+
+            self.client = session.client(service_name="s3", config=client_config)
         super().__init__(session_id=session_id, session_repository=self)
 
     def _get_session_path(self, session_id: str) -> str:
@@ -287,12 +295,31 @@ class S3SessionManager(RepositorySessionManager, SessionRepository):
             else:
                 message_keys = message_keys[offset:]
 
-            # Load only the required message objects
+            # Load only the required message objects in parallel
             messages: List[SessionMessage] = []
-            for key in message_keys:
-                message_data = self._read_s3_object(key)
-                if message_data:
-                    messages.append(SessionMessage.from_dict(message_data))
+
+            # Use ThreadPoolExecutor for parallel S3 retrieval
+            with ThreadPoolExecutor() as executor:
+                # Submit all read tasks
+                future_to_index = {
+                    executor.submit(self._read_s3_object, key): idx for idx, key in enumerate(message_keys)
+                }
+
+                # Collect results as they complete
+                results: list[tuple[int, SessionMessage]] = []
+                for future in as_completed(future_to_index):
+                    idx = future_to_index[future]
+                    try:
+                        message_data = future.result()
+                        if message_data:
+                            results.append((idx, SessionMessage.from_dict(message_data)))
+                    except Exception as e:
+                        logger.warning("Failed to load message at index %s: %s", idx, e)
+                        # Continue processing other messages even if one fails
+
+                # Sort by original index to maintain message order
+                results.sort(key=lambda x: x[0])
+                messages = [msg for _, msg in results]
 
             return messages
 
@@ -326,3 +353,20 @@ class S3SessionManager(RepositorySessionManager, SessionRepository):
 
         multi_agent_key = f"{self._get_multi_agent_path(session_id, multi_agent.id)}multi_agent.json"
         self._write_s3_object(multi_agent_key, multi_agent_state)
+
+    def set_session_id(self, session_id: str) -> None:
+        """Update the session ID for this manager.
+
+        This allows reusing a single S3SessionManager instance across multiple sessions,
+        which is useful for singleton patterns and reduces client initialization overhead.
+
+        Args:
+            session_id: New session ID to use
+                ID is not allowed to contain path separators (e.g., a/b).
+
+        Raises:
+            ValueError: If session_id contains path separators.
+        """
+        # Validate the new session_id
+        _identifier.validate(session_id, _identifier.Identifier.SESSION)
+        self.session_id = session_id

@@ -447,3 +447,171 @@ def test_update_nonexistent_multi_agent(s3_manager, sample_session):
     nonexistent_mock.id = "nonexistent"
     with pytest.raises(SessionException):
         s3_manager.update_multi_agent(sample_session.session_id, nonexistent_mock)
+
+
+def test_init_with_custom_s3_client(mocked_aws, s3_bucket):
+    """Test that S3SessionManager can accept a custom S3 client."""
+    # Create a custom S3 client
+    custom_client = boto3.client("s3", region_name="us-east-1")
+
+    # Initialize manager with custom client
+    manager = S3SessionManager(session_id="test", bucket=s3_bucket, s3_client=custom_client)
+
+    # Verify the custom client is used
+    assert manager.client is custom_client
+
+
+def test_init_with_custom_s3_client_ignores_other_params(mocked_aws, s3_bucket):
+    """Test that when s3_client is provided, other boto params are ignored."""
+    # Create a custom S3 client
+    custom_client = boto3.client("s3", region_name="us-east-1")
+
+    # These params should be ignored when s3_client is provided
+    manager = S3SessionManager(
+        session_id="test",
+        bucket=s3_bucket,
+        s3_client=custom_client,
+        region_name="us-west-2",  # Should be ignored
+        boto_client_config=BotocoreConfig(user_agent_extra="test"),  # Should be ignored
+    )
+
+    # Verify the custom client is used (not a new one from the ignored params)
+    assert manager.client is custom_client
+
+
+def test_set_session_id(s3_manager, sample_session):
+    """Test updating session_id on an existing manager."""
+    # Create initial session
+    s3_manager.create_session(sample_session)
+
+    # Change to a different session_id
+    new_session_id = "new-session-456"
+    s3_manager.set_session_id(new_session_id)
+
+    # Verify session_id was updated
+    assert s3_manager.session_id == new_session_id
+
+    # Verify we can now work with the new session
+    new_session = Session(session_id=new_session_id, session_type=SessionType.AGENT)
+    s3_manager.create_session(new_session)
+
+    # Read back the new session
+    result = s3_manager.read_session(new_session_id)
+    assert result.session_id == new_session_id
+
+
+def test_set_session_id_singleton_pattern(mocked_aws):
+    """Test using S3SessionManager as a singleton with multiple session IDs."""
+    # Create a dedicated bucket for this test to avoid state sharing
+    import uuid
+
+    s3_client = boto3.client("s3", region_name="us-west-2")
+    test_bucket = f"test-singleton-bucket-{uuid.uuid4().hex[:8]}"
+    s3_client.create_bucket(Bucket=test_bucket, CreateBucketConfiguration={"LocationConstraint": "us-west-2"})
+
+    # Create a single manager instance and manually create sessions
+    manager = S3SessionManager(session_id="dummy-initial", bucket=test_bucket, region_name="us-west-2")
+
+    # Create first session manually (bypassing RepositorySessionManager auto-creation)
+    session1 = Session(session_id="singleton-session-1", session_type=SessionType.AGENT)
+    session1_key = f"{manager._get_session_path('singleton-session-1')}session.json"
+    manager._write_s3_object(session1_key, session1.to_dict())
+
+    # Create second session manually
+    session2 = Session(session_id="singleton-session-2", session_type=SessionType.AGENT)
+    session2_key = f"{manager._get_session_path('singleton-session-2')}session.json"
+    manager._write_s3_object(session2_key, session2.to_dict())
+
+    # Create third session manually
+    session3 = Session(session_id="singleton-session-3", session_type=SessionType.AGENT)
+    session3_key = f"{manager._get_session_path('singleton-session-3')}session.json"
+    manager._write_s3_object(session3_key, session3.to_dict())
+
+    # Now test switching between sessions using set_session_id
+    manager.set_session_id("singleton-session-1")
+    assert manager.read_session("singleton-session-1").session_id == "singleton-session-1"
+
+    manager.set_session_id("singleton-session-2")
+    assert manager.read_session("singleton-session-2").session_id == "singleton-session-2"
+
+    manager.set_session_id("singleton-session-3")
+    assert manager.read_session("singleton-session-3").session_id == "singleton-session-3"
+
+    # Verify the manager's session_id was updated correctly
+    assert manager.session_id == "singleton-session-3"
+
+
+def test_set_session_id_invalid(s3_manager):
+    """Test that set_session_id validates the new session_id."""
+    # Try to set an invalid session_id with path separators
+    with pytest.raises(ValueError, match="id cannot contain path separators"):
+        s3_manager.set_session_id("invalid/session/id")
+
+
+def test_list_messages_parallel_order_preserved(s3_manager, sample_session, sample_agent):
+    """Test that parallel message retrieval preserves message order."""
+    # Create session and agent
+    s3_manager.create_session(sample_session)
+    s3_manager.create_agent(sample_session.session_id, sample_agent)
+
+    # Create 100 messages with distinct content
+    expected_order = []
+    for i in range(100):
+        message = SessionMessage.from_message(
+            message={
+                "role": "user",
+                "content": [ContentBlock(text=f"Message {i}")],
+            },
+            index=i,
+        )
+        expected_order.append(f"Message {i}")
+        s3_manager.create_message(sample_session.session_id, sample_agent.agent_id, message)
+
+    # List all messages
+    result = s3_manager.list_messages(sample_session.session_id, sample_agent.agent_id)
+
+    # Verify order is preserved
+    assert len(result) == 100
+    for i, message in enumerate(result):
+        assert message.message["content"][0]["text"] == expected_order[i]
+
+
+def test_list_messages_parallel_with_pagination(s3_manager, sample_session, sample_agent):
+    """Test that parallel message retrieval works correctly with pagination."""
+    # Create session and agent
+    s3_manager.create_session(sample_session)
+    s3_manager.create_agent(sample_session.session_id, sample_agent)
+
+    # Create 50 messages
+    for i in range(50):
+        message = SessionMessage.from_message(
+            message={
+                "role": "user",
+                "content": [ContentBlock(text=f"Message {i}")],
+            },
+            index=i,
+        )
+        s3_manager.create_message(sample_session.session_id, sample_agent.agent_id, message)
+
+    # Test limit
+    result = s3_manager.list_messages(sample_session.session_id, sample_agent.agent_id, limit=10)
+    assert len(result) == 10
+    assert result[0].message["content"][0]["text"] == "Message 0"
+    assert result[9].message["content"][0]["text"] == "Message 9"
+
+    # Test offset
+    result = s3_manager.list_messages(sample_session.session_id, sample_agent.agent_id, offset=40, limit=10)
+    assert len(result) == 10
+    assert result[0].message["content"][0]["text"] == "Message 40"
+    assert result[9].message["content"][0]["text"] == "Message 49"
+
+
+def test_list_messages_empty(s3_manager, sample_session, sample_agent):
+    """Test listing messages when there are no messages."""
+    # Create session and agent
+    s3_manager.create_session(sample_session)
+    s3_manager.create_agent(sample_session.session_id, sample_agent)
+
+    # List messages (should be empty)
+    result = s3_manager.list_messages(sample_session.session_id, sample_agent.agent_id)
+    assert len(result) == 0
