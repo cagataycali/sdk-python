@@ -10,6 +10,7 @@ The Agent interface supports two complementary interaction patterns:
 """
 
 import logging
+import threading
 import warnings
 from typing import (
     TYPE_CHECKING,
@@ -59,7 +60,7 @@ from ..tools.watcher import ToolWatcher
 from ..types._events import AgentResultEvent, InitEventLoopEvent, ModelStreamChunkEvent, TypedEvent
 from ..types.agent import AgentInput
 from ..types.content import ContentBlock, Message, Messages, SystemContentBlock
-from ..types.exceptions import ContextWindowOverflowException
+from ..types.exceptions import ConcurrencyException, ContextWindowOverflowException
 from ..types.traces import AttributeValue
 from .agent_result import AgentResult
 from .conversation_manager import (
@@ -244,6 +245,9 @@ class Agent:
         self.hooks = HookRegistry()
 
         self._interrupt_state = _InterruptState()
+
+        # Initialize concurrency protection lock
+        self._invocation_lock = threading.Lock()
 
         # Initialize session management functionality
         self._session_manager = session_manager
@@ -562,46 +566,57 @@ class Agent:
         """
         self._interrupt_state.resume(prompt)
 
-        merged_state = {}
-        if kwargs:
-            warnings.warn("`**kwargs` parameter is deprecating, use `invocation_state` instead.", stacklevel=2)
-            merged_state.update(kwargs)
-            if invocation_state is not None:
-                merged_state["invocation_state"] = invocation_state
-        else:
-            if invocation_state is not None:
-                merged_state = invocation_state
+        # Check for concurrent invocations - raise exception if already processing
+        if not self._invocation_lock.acquire(blocking=False):
+            raise ConcurrencyException(
+                "Concurrent invocation detected. Another invocation is currently in progress. "
+                "Please wait for the current invocation to complete before starting a new one."
+            )
 
-        callback_handler = self.callback_handler
-        if kwargs:
-            callback_handler = kwargs.get("callback_handler", self.callback_handler)
+        try:
+            merged_state = {}
+            if kwargs:
+                warnings.warn("`**kwargs` parameter is deprecating, use `invocation_state` instead.", stacklevel=2)
+                merged_state.update(kwargs)
+                if invocation_state is not None:
+                    merged_state["invocation_state"] = invocation_state
+            else:
+                if invocation_state is not None:
+                    merged_state = invocation_state
 
-        # Process input and get message to add (if any)
-        messages = await self._convert_prompt_to_messages(prompt)
+            callback_handler = self.callback_handler
+            if kwargs:
+                callback_handler = kwargs.get("callback_handler", self.callback_handler)
 
-        self.trace_span = self._start_agent_trace_span(messages)
+            # Process input and get message to add (if any)
+            messages = await self._convert_prompt_to_messages(prompt)
 
-        with trace_api.use_span(self.trace_span):
-            try:
-                events = self._run_loop(messages, merged_state, structured_output_model)
+            self.trace_span = self._start_agent_trace_span(messages)
 
-                async for event in events:
-                    event.prepare(invocation_state=merged_state)
+            with trace_api.use_span(self.trace_span):
+                try:
+                    events = self._run_loop(messages, merged_state, structured_output_model)
 
-                    if event.is_callback_event:
-                        as_dict = event.as_dict()
-                        callback_handler(**as_dict)
-                        yield as_dict
+                    async for event in events:
+                        event.prepare(invocation_state=merged_state)
 
-                result = AgentResult(*event["stop"])
-                callback_handler(result=result)
-                yield AgentResultEvent(result=result).as_dict()
+                        if event.is_callback_event:
+                            as_dict = event.as_dict()
+                            callback_handler(**as_dict)
+                            yield as_dict
 
-                self._end_agent_trace_span(response=result)
+                    result = AgentResult(*event["stop"])
+                    callback_handler(result=result)
+                    yield AgentResultEvent(result=result).as_dict()
 
-            except Exception as e:
-                self._end_agent_trace_span(error=e)
-                raise
+                    self._end_agent_trace_span(response=result)
+
+                except Exception as e:
+                    self._end_agent_trace_span(error=e)
+                    raise
+        finally:
+            # Always release the lock when invocation completes
+            self._invocation_lock.release()
 
     async def _run_loop(
         self,

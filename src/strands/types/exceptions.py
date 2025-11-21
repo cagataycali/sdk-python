@@ -94,3 +94,23 @@ class StructuredOutputException(Exception):
         """
         self.message = message
         super().__init__(message)
+
+
+class ConcurrencyException(Exception):
+    """Exception raised when concurrent invocations to the same Agent instance are detected.
+
+    This exception is raised to prevent corruption of the agent's internal state when multiple
+    invocations attempt to execute concurrently. This commonly occurs during retries when a
+    timeout triggers a new invocation while the previous one is still processing.
+    """
+
+    def __init__(
+        self, message: str = "Concurrent invocation detected. Please wait for the current invocation to complete."
+    ):
+        """Initialize the exception with an error message.
+
+        Args:
+            message: The error message describing the concurrency issue
+        """
+        self.message = message
+        super().__init__(message)

@@ -2181,3 +2181,63 @@ def test_agent_skips_fix_for_valid_conversation(mock_model, agenerator):
     # Should not have added any toolResult messages
     # Only the new user message and assistant response should be added
     assert len(agent.messages) == original_length + 2
+
+
+@pytest.mark.asyncio
+async def test_agent_concurrent_invocation_raises_exception(mock_model):
+    """Test that concurrent invocations raise ConcurrencyException."""
+    import asyncio
+
+    from strands.types.exceptions import ConcurrencyException
+
+    # Create a slow async generator to simulate long-running invocation
+    async def slow_generator():
+        yield {"contentBlockStart": {"start": {"text": ""}}}
+        await asyncio.sleep(0.2)  # Simulate processing time
+        yield {"contentBlockDelta": {"delta": {"text": "slow"}}}
+        yield {"contentBlockStop": {}}
+        yield {"messageStop": {"stopReason": "end_turn"}}
+
+    mock_model.mock_stream.return_value = slow_generator()
+
+    agent = Agent(model=mock_model)
+
+    # Start first invocation (don't await yet)
+    first_invocation = asyncio.create_task(agent.invoke_async("First prompt"))
+
+    # Give first invocation time to acquire the lock
+    await asyncio.sleep(0.05)
+
+    # Try second concurrent invocation - should raise ConcurrencyException
+    with pytest.raises(ConcurrencyException) as exc_info:
+        await agent.invoke_async("Second prompt")
+
+    assert "Concurrent invocation detected" in str(exc_info.value)
+    assert "Another invocation is currently in progress" in str(exc_info.value)
+
+    # Wait for first invocation to complete
+    result = await first_invocation
+    assert result.message["content"][0]["text"] == "slow"
+
+
+@pytest.mark.asyncio
+async def test_agent_sequential_invocations_work(mock_model):
+    """Test that sequential invocations work correctly after lock is released."""
+
+    async def fast_generator():
+        yield {"contentBlockStart": {"start": {"text": ""}}}
+        yield {"contentBlockDelta": {"delta": {"text": "response"}}}
+        yield {"contentBlockStop": {}}
+        yield {"messageStop": {"stopReason": "end_turn"}}
+
+    agent = Agent(model=mock_model)
+
+    # First invocation
+    mock_model.mock_stream.return_value = fast_generator()
+    result1 = await agent.invoke_async("First prompt")
+    assert result1.message["content"][0]["text"] == "response"
+
+    # Second invocation should work since first completed
+    mock_model.mock_stream.return_value = fast_generator()
+    result2 = await agent.invoke_async("Second prompt")
+    assert result2.message["content"][0]["text"] == "response"
