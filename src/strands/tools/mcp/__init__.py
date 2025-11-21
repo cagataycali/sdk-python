@@ -7,7 +7,7 @@ servers.
 """
 
 from .mcp_agent_tool import MCPAgentTool
-from .mcp_client import MCPClient, ToolFilters
+from .mcp_client import MCPClient, ToolFilters, create_http_transport_with_dynamic_headers
 from .mcp_types import MCPTransport
 
-__all__ = ["MCPAgentTool", "MCPClient", "MCPTransport", "ToolFilters"]
+__all__ = ["MCPAgentTool", "MCPClient", "MCPTransport", "ToolFilters", "create_http_transport_with_dynamic_headers"]

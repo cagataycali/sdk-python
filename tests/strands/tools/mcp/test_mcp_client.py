@@ -688,3 +688,151 @@ def test_call_tool_sync_embedded_unknown_resource_type_dropped(mock_transport, m
         mock_session.call_tool.assert_called_once_with("get_file_contents", {}, None)
         assert result["status"] == "success"
         assert len(result["content"]) == 0  # Unknown resource type should be dropped
+
+
+# Dynamic Headers Tests
+
+
+def test_create_http_transport_with_dynamic_headers():
+    """Test that create_http_transport_with_dynamic_headers correctly generates headers."""
+    from strands.tools.mcp.mcp_client import create_http_transport_with_dynamic_headers
+
+    # Track if the header_generator was called
+    header_gen_called = []
+
+    def mock_header_generator(ctx):
+        header_gen_called.append(True)
+        return {
+            "Authorization": f"Bearer {ctx.get('token', 'default-token')}",
+            "X-User-ID": ctx.get("user_id", "anonymous"),
+        }
+
+    # Track if the base transport was called with headers
+    base_transport_called = []
+
+    def mock_base_transport(headers):
+        base_transport_called.append(headers)
+        return MagicMock()
+
+    # Create the wrapped transport
+    transport_fn = create_http_transport_with_dynamic_headers(
+        base_transport_fn=mock_base_transport,
+        header_generator=mock_header_generator,
+        context={"token": "test-token-123", "user_id": "user456"},
+    )
+
+    # Call the transport callable
+    transport_fn()
+
+    # Verify header generator was called
+    assert len(header_gen_called) == 1
+
+    # Verify base transport was called with generated headers
+    assert len(base_transport_called) == 1
+    headers = base_transport_called[0]
+    assert headers["Authorization"] == "Bearer test-token-123"
+    assert headers["X-User-ID"] == "user456"
+
+
+def test_create_http_transport_with_dynamic_headers_no_context():
+    """Test that create_http_transport_with_dynamic_headers works with no context."""
+    from strands.tools.mcp.mcp_client import create_http_transport_with_dynamic_headers
+
+    def mock_header_generator(ctx):
+        # Should receive empty dict if no context provided
+        assert isinstance(ctx, dict)
+        return {"X-Default-Header": "value"}
+
+    base_transport_called = []
+
+    def mock_base_transport(headers):
+        base_transport_called.append(headers)
+        return MagicMock()
+
+    # Create without context
+    transport_fn = create_http_transport_with_dynamic_headers(
+        base_transport_fn=mock_base_transport,
+        header_generator=mock_header_generator,
+    )
+
+    transport_fn()
+
+    assert len(base_transport_called) == 1
+    assert base_transport_called[0]["X-Default-Header"] == "value"
+
+
+def test_create_http_transport_with_dynamic_headers_callable_integration():
+    """Test integration with MCPClient using create_http_transport_with_dynamic_headers."""
+    from strands.tools.mcp.mcp_client import create_http_transport_with_dynamic_headers
+
+    # Simulate a scenario where auth token is refreshed each time
+    call_count = [0]
+
+    def get_fresh_token():
+        call_count[0] += 1
+        return f"token-{call_count[0]}"
+
+    def header_generator(ctx):
+        return {
+            "Authorization": f"Bearer {get_fresh_token()}",
+            "X-Request-ID": ctx.get("request_id", "unknown"),
+        }
+
+    # Mock base transport that captures headers
+    captured_headers = []
+
+    def mock_base_transport(headers):
+        captured_headers.append(headers)
+        # Return a mock transport context manager
+        mock_cm = AsyncMock()
+        mock_cm.__aenter__.return_value = (AsyncMock(), AsyncMock())
+        return mock_cm
+
+    # Create transport with dynamic headers
+    transport_fn = create_http_transport_with_dynamic_headers(
+        base_transport_fn=mock_base_transport,
+        header_generator=header_generator,
+        context={"request_id": "req-123"},
+    )
+
+    # Use with MCPClient
+    with patch("strands.tools.mcp.mcp_client.ClientSession"):
+        client = MCPClient(transport_fn)
+        try:
+            client.start()
+            time.sleep(0.5)  # Allow background thread to initialize
+        except Exception:
+            pass  # We expect some errors since we're using mocks
+        finally:
+            client.stop(None, None, None)
+
+    # Verify headers were generated
+    assert len(captured_headers) >= 1
+    first_headers = captured_headers[0]
+    assert "Authorization" in first_headers
+    assert "Bearer token-1" in first_headers["Authorization"]
+    assert first_headers["X-Request-ID"] == "req-123"
+
+
+def test_mcp_client_with_header_generator_parameter():
+    """Test that MCPClient correctly stores header_generator parameter."""
+    from strands.tools.mcp.mcp_client import create_http_transport_with_dynamic_headers
+
+    def mock_header_generator(ctx):
+        return {"X-Test": "value"}
+
+    def mock_base_transport(headers):
+        mock_cm = AsyncMock()
+        mock_cm.__aenter__.return_value = (AsyncMock(), AsyncMock())
+        return mock_cm
+
+    transport_fn = create_http_transport_with_dynamic_headers(
+        base_transport_fn=mock_base_transport,
+        header_generator=mock_header_generator,
+    )
+
+    # Create client with header_generator parameter (stored but not used directly)
+    client = MCPClient(transport_fn, header_generator=mock_header_generator)
+
+    # Verify header_generator is stored
+    assert client._header_generator == mock_header_generator

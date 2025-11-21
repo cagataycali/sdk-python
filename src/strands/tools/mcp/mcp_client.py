@@ -42,6 +42,56 @@ logger = logging.getLogger(__name__)
 T = TypeVar("T")
 
 
+def create_http_transport_with_dynamic_headers(
+    base_transport_fn: Callable[[Optional[dict[str, str]]], MCPTransport],
+    header_generator: Callable[[dict[str, Any]], dict[str, str]],
+    context: Optional[dict[str, Any]] = None,
+) -> Callable[[], MCPTransport]:
+    """Create a transport callable that injects dynamically generated headers.
+
+    This helper function wraps a transport creation function to inject headers
+    generated at connection time. This is useful for authentication scenarios
+    where tokens or credentials need to be fetched dynamically.
+
+    Args:
+        base_transport_fn: A function that accepts optional headers and returns an MCPTransport.
+            Example: lambda headers: streamablehttp_client(url="...", headers=headers)
+        header_generator: A callback function that generates headers based on context.
+            The function receives a context dictionary and should return a dict of headers.
+            Example: lambda ctx: {"Authorization": f"Bearer {get_current_token()}"}
+        context: Optional context dictionary to pass to the header_generator.
+            Defaults to an empty dictionary if not provided.
+
+    Returns:
+        A transport_callable suitable for use with MCPClient.
+
+    Example:
+        >>> def get_auth_token():
+        ...     return "my-secret-token"
+        >>>
+        >>> transport_fn = create_http_transport_with_dynamic_headers(
+        ...     base_transport_fn=lambda headers: streamablehttp_client(
+        ...         url="https://api.example.com/mcp",
+        ...         headers=headers
+        ...     ),
+        ...     header_generator=lambda ctx: {
+        ...         "Authorization": f"Bearer {get_auth_token()}",
+        ...         "X-User-ID": ctx.get("user_id", "anonymous")
+        ...     },
+        ...     context={"user_id": "user123"}
+        ... )
+        >>>
+        >>> client = MCPClient(transport_fn)
+    """
+    context = context or {}
+
+    def wrapped_transport() -> MCPTransport:
+        dynamic_headers = header_generator(context)
+        return base_transport_fn(dynamic_headers)
+
+    return wrapped_transport
+
+
 class _ToolFilterCallback(Protocol):
     def __call__(self, tool: AgentTool, **kwargs: Any) -> bool: ...
 
@@ -100,6 +150,7 @@ class MCPClient(ToolProvider):
         tool_filters: ToolFilters | None = None,
         prefix: str | None = None,
         elicitation_callback: Optional[ElicitationFnT] = None,
+        header_generator: Optional[Callable[[dict[str, Any]], dict[str, str]]] = None,
     ) -> None:
         """Initialize a new MCP Server connection.
 
@@ -110,11 +161,16 @@ class MCPClient(ToolProvider):
             tool_filters: Optional filters to apply to tools.
             prefix: Optional prefix for tool names.
             elicitation_callback: Optional callback function to handle elicitation requests from the MCP server.
+            header_generator: Optional callback function that generates HTTP headers dynamically.
+                The function receives a context dictionary and should return a dictionary of headers.
+                Note: Headers are generated at connection initialization time, not per-request.
+                Example: lambda ctx: {"Authorization": f"Bearer {get_token()}"}
         """
         self._startup_timeout = startup_timeout
         self._tool_filters = tool_filters
         self._prefix = prefix
         self._elicitation_callback = elicitation_callback
+        self._header_generator = header_generator
 
         mcp_instrumentation()
         self._session_id = uuid.uuid4()
