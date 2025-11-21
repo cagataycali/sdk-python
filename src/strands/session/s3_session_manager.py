@@ -2,6 +2,7 @@
 
 import json
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, cast
 
 import boto3
@@ -287,12 +288,31 @@ class S3SessionManager(RepositorySessionManager, SessionRepository):
             else:
                 message_keys = message_keys[offset:]
 
-            # Load only the required message objects
+            # Load only the required message objects in parallel
             messages: List[SessionMessage] = []
-            for key in message_keys:
-                message_data = self._read_s3_object(key)
-                if message_data:
-                    messages.append(SessionMessage.from_dict(message_data))
+
+            # Use ThreadPoolExecutor for parallel S3 retrieval
+            with ThreadPoolExecutor() as executor:
+                # Submit all read tasks
+                future_to_index = {
+                    executor.submit(self._read_s3_object, key): idx for idx, key in enumerate(message_keys)
+                }
+
+                # Collect results as they complete
+                results: list[tuple[int, SessionMessage]] = []
+                for future in as_completed(future_to_index):
+                    idx = future_to_index[future]
+                    try:
+                        message_data = future.result()
+                        if message_data:
+                            results.append((idx, SessionMessage.from_dict(message_data)))
+                    except Exception as e:
+                        logger.warning("Failed to load message at index %s: %s", idx, e)
+                        # Continue processing other messages even if one fails
+
+                # Sort by original index to maintain message order
+                results.sort(key=lambda x: x[0])
+                messages = [msg for _, msg in results]
 
             return messages
 

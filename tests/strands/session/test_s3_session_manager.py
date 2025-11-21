@@ -447,3 +447,72 @@ def test_update_nonexistent_multi_agent(s3_manager, sample_session):
     nonexistent_mock.id = "nonexistent"
     with pytest.raises(SessionException):
         s3_manager.update_multi_agent(sample_session.session_id, nonexistent_mock)
+
+
+def test_list_messages_parallel_order_preserved(s3_manager, sample_session, sample_agent):
+    """Test that parallel message retrieval preserves message order."""
+    # Create session and agent
+    s3_manager.create_session(sample_session)
+    s3_manager.create_agent(sample_session.session_id, sample_agent)
+
+    # Create 100 messages with distinct content
+    expected_order = []
+    for i in range(100):
+        message = SessionMessage.from_message(
+            message={
+                "role": "user",
+                "content": [ContentBlock(text=f"Message {i}")],
+            },
+            index=i,
+        )
+        expected_order.append(f"Message {i}")
+        s3_manager.create_message(sample_session.session_id, sample_agent.agent_id, message)
+
+    # List all messages
+    result = s3_manager.list_messages(sample_session.session_id, sample_agent.agent_id)
+
+    # Verify order is preserved
+    assert len(result) == 100
+    for i, message in enumerate(result):
+        assert message.message["content"][0]["text"] == expected_order[i]
+
+
+def test_list_messages_parallel_with_pagination(s3_manager, sample_session, sample_agent):
+    """Test that parallel message retrieval works correctly with pagination."""
+    # Create session and agent
+    s3_manager.create_session(sample_session)
+    s3_manager.create_agent(sample_session.session_id, sample_agent)
+
+    # Create 50 messages
+    for i in range(50):
+        message = SessionMessage.from_message(
+            message={
+                "role": "user",
+                "content": [ContentBlock(text=f"Message {i}")],
+            },
+            index=i,
+        )
+        s3_manager.create_message(sample_session.session_id, sample_agent.agent_id, message)
+
+    # Test limit
+    result = s3_manager.list_messages(sample_session.session_id, sample_agent.agent_id, limit=10)
+    assert len(result) == 10
+    assert result[0].message["content"][0]["text"] == "Message 0"
+    assert result[9].message["content"][0]["text"] == "Message 9"
+
+    # Test offset
+    result = s3_manager.list_messages(sample_session.session_id, sample_agent.agent_id, offset=40, limit=10)
+    assert len(result) == 10
+    assert result[0].message["content"][0]["text"] == "Message 40"
+    assert result[9].message["content"][0]["text"] == "Message 49"
+
+
+def test_list_messages_empty(s3_manager, sample_session, sample_agent):
+    """Test listing messages when there are no messages."""
+    # Create session and agent
+    s3_manager.create_session(sample_session)
+    s3_manager.create_agent(sample_session.session_id, sample_agent)
+
+    # List messages (should be empty)
+    result = s3_manager.list_messages(sample_session.session_id, sample_agent.agent_id)
+    assert len(result) == 0
