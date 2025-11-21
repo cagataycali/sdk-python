@@ -197,6 +197,72 @@ agent("What is the square root of 1764")
 
 It's also available on GitHub via [strands-agents/tools](https://github.com/strands-agents/tools).
 
+### Dynamic Map-Reduce Patterns
+
+Implement dynamic map-reduce workflows with 1-N agents spawned at runtime, similar to LangGraph's Send API:
+
+```python
+from strands import Agent
+from strands_tools import workflow
+
+agent = Agent(tools=[workflow])
+
+# Dynamically create tasks based on data complexity
+chunks = split_document(large_document)  # Returns 1-5 chunks
+
+tasks = []
+map_task_ids = []
+
+# Map phase: parallel processing
+for i, chunk in enumerate(chunks):
+    task_id = f"map_chunk_{i+1}"
+    map_task_ids.append(task_id)
+    tasks.append({
+        "task_id": task_id,
+        "description": f"Summarize chunk: {chunk}",
+        "tools": ["file_write"],
+        "priority": 5,  # High priority for parallel execution
+    })
+
+# Reduce phase: aggregate results
+tasks.append({
+    "task_id": "reduce",
+    "description": "Create summary of summaries",
+    "dependencies": map_task_ids,  # Waits for all map tasks
+    "tools": ["file_read", "file_write"],
+})
+
+# Execute with automatic parallelization
+agent.tool.workflow(action="create", workflow_id="mapreduce", tasks=tasks)
+agent.tool.workflow(action="start", workflow_id="mapreduce")
+```
+
+**Alternative: Swarm-Based Map-Reduce** for autonomous coordination:
+
+```python
+from strands_tools import swarm
+
+# Agents decide collaboration patterns autonomously
+mapper_agents = [
+    {"name": f"mapper_{i}", "system_prompt": f"Summarize chunk {i}: {chunks[i]}"}
+    for i in range(len(chunks))
+]
+mapper_agents.append({
+    "name": "reducer", 
+    "system_prompt": "Synthesize all summaries into final output"
+})
+
+agent.tool.swarm(task="Create comprehensive summary", agents=mapper_agents)
+```
+
+📚 **[See complete map-reduce examples →](./examples/map_reduce_patterns.py)**
+
+**Use Cases:**
+- Document summarization with variable chunk counts
+- Parallel data processing pipelines
+- Distributed computation tasks
+- Any scenario requiring N workers + 1 aggregator
+
 ## Documentation
 
 For detailed guidance & examples, explore our documentation:
