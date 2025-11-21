@@ -88,6 +88,8 @@ class BedrockModel(Model):
                 True includes status, False removes status, "auto" determines based on model_id. Defaults to "auto".
             stop_sequences: List of sequences that will stop generation when encountered
             streaming: Flag to enable/disable streaming. Defaults to True.
+            system_tools: List of system tool names to enable (e.g., ["webGrounding"]).
+                System tools are built-in model capabilities provided by Bedrock.
             temperature: Controls randomness in generation (higher = more random)
             top_p: Controls diversity via nucleus sampling (alternative to temperature)
         """
@@ -110,6 +112,7 @@ class BedrockModel(Model):
         include_tool_result_status: Optional[Literal["auto"] | bool]
         stop_sequences: Optional[list[str]]
         streaming: Optional[bool]
+        system_tools: Optional[list[str]]
         temperature: Optional[float]
         top_p: Optional[float]
 
@@ -230,16 +233,28 @@ class BedrockModel(Model):
                 {
                     "toolConfig": {
                         "tools": [
-                            *[
-                                {
-                                    "toolSpec": {
-                                        "name": tool_spec["name"],
-                                        "description": tool_spec["description"],
-                                        "inputSchema": tool_spec["inputSchema"],
+                            *(
+                                [
+                                    {
+                                        "toolSpec": {
+                                            "name": tool_spec["name"],
+                                            "description": tool_spec["description"],
+                                            "inputSchema": tool_spec["inputSchema"],
+                                        }
                                     }
-                                }
-                                for tool_spec in tool_specs
-                            ],
+                                    for tool_spec in tool_specs
+                                ]
+                                if tool_specs
+                                else []
+                            ),
+                            *(
+                                [
+                                    {"systemTool": {"name": system_tool}}
+                                    for system_tool in (self.config.get("system_tools") or [])
+                                ]
+                                if self.config.get("system_tools")
+                                else []
+                            ),
                             *(
                                 [{"cachePoint": {"type": self.config["cache_tools"]}}]
                                 if self.config.get("cache_tools")
@@ -249,7 +264,7 @@ class BedrockModel(Model):
                         **({"toolChoice": tool_choice if tool_choice else {"auto": {}}}),
                     }
                 }
-                if tool_specs
+                if tool_specs or self.config.get("system_tools")
                 else {}
             ),
             **(

@@ -2007,6 +2007,72 @@ def test_init_with_unsupported_region_custom_model_no_warning(session_cls, captu
     assert len(captured_warnings) == 0
 
 
+def test_format_request_system_tools(model, messages, model_id):
+    """Test that system tools are correctly added to tool config."""
+    system_tools = ["webGrounding"]
+    model.update_config(system_tools=system_tools)
+
+    tru_request = model._format_request(messages)
+    exp_request = {
+        "inferenceConfig": {},
+        "modelId": model_id,
+        "messages": messages,
+        "system": [],
+        "toolConfig": {
+            "tools": [{"systemTool": {"name": "webGrounding"}}],
+            "toolChoice": {"auto": {}},
+        },
+    }
+
+    assert tru_request == exp_request
+
+
+def test_format_request_system_tools_with_tool_specs(model, messages, model_id, tool_spec):
+    """Test that system tools are added alongside regular tool specs."""
+    system_tools = ["webGrounding"]
+    model.update_config(system_tools=system_tools)
+
+    tru_request = model._format_request(messages, tool_specs=[tool_spec])
+    exp_request = {
+        "inferenceConfig": {},
+        "modelId": model_id,
+        "messages": messages,
+        "system": [],
+        "toolConfig": {
+            "tools": [
+                {"toolSpec": tool_spec},
+                {"systemTool": {"name": "webGrounding"}},
+            ],
+            "toolChoice": {"auto": {}},
+        },
+    }
+
+    assert tru_request == exp_request
+
+
+def test_format_request_multiple_system_tools(model, messages, model_id):
+    """Test that multiple system tools can be specified."""
+    system_tools = ["webGrounding", "futureSystemTool"]
+    model.update_config(system_tools=system_tools)
+
+    tru_request = model._format_request(messages)
+    exp_request = {
+        "inferenceConfig": {},
+        "modelId": model_id,
+        "messages": messages,
+        "system": [],
+        "toolConfig": {
+            "tools": [
+                {"systemTool": {"name": "webGrounding"}},
+                {"systemTool": {"name": "futureSystemTool"}},
+            ],
+            "toolChoice": {"auto": {}},
+        },
+    }
+
+    assert tru_request == exp_request
+
+
 def test_override_default_model_id_uses_the_overriden_value(captured_warnings):
     with unittest.mock.patch("strands.models.bedrock.DEFAULT_BEDROCK_MODEL_ID", "custom-overridden-model"):
         model_id = BedrockModel._get_default_model_with_warning("us-east-1")
