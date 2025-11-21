@@ -336,6 +336,114 @@ def test_normalize_schema_with_additional_properties():
     assert normalized == expected
 
 
+def test_normalize_schema_with_anyof():
+    """Test that anyOf properties don't get default type='string'."""
+    schema = {
+        "type": "object",
+        "properties": {"items": {"anyOf": [{"items": {"type": "string"}, "type": "array"}, {"type": "null"}]}},
+    }
+    normalized = normalize_schema(schema)
+
+    expected = {
+        "type": "object",
+        "properties": {
+            "items": {
+                "anyOf": [{"items": {"type": "string"}, "type": "array"}, {"type": "null"}],
+                "description": "Property items",
+            }
+        },
+        "required": [],
+    }
+
+    assert normalized == expected
+    # Ensure type was NOT set to "string"
+    assert "type" not in normalized["properties"]["items"]
+
+
+def test_normalize_schema_with_oneof():
+    """Test that oneOf properties don't get default type='string'."""
+    schema = {
+        "type": "object",
+        "properties": {"value": {"oneOf": [{"type": "string"}, {"type": "integer"}]}},
+    }
+    normalized = normalize_schema(schema)
+
+    expected = {
+        "type": "object",
+        "properties": {"value": {"oneOf": [{"type": "string"}, {"type": "integer"}], "description": "Property value"}},
+        "required": [],
+    }
+
+    assert normalized == expected
+    # Ensure type was NOT set to "string"
+    assert "type" not in normalized["properties"]["value"]
+
+
+def test_normalize_schema_with_allof():
+    """Test that allOf properties don't get default type='string'."""
+    schema = {
+        "type": "object",
+        "properties": {
+            "config": {
+                "allOf": [{"type": "object", "properties": {"name": {"type": "string"}}}, {"required": ["name"]}]
+            }
+        },
+    }
+    normalized = normalize_schema(schema)
+
+    expected = {
+        "type": "object",
+        "properties": {
+            "config": {
+                "allOf": [
+                    {"type": "object", "properties": {"name": {"type": "string"}}},
+                    {"required": ["name"]},
+                ],
+                "description": "Property config",
+            }
+        },
+        "required": [],
+    }
+
+    assert normalized == expected
+    # Ensure type was NOT set to "string"
+    assert "type" not in normalized["properties"]["config"]
+
+
+def test_normalize_schema_with_anyof_list_of_strings():
+    """Test the exact case from issue #1190: List[str] | None represented as anyOf."""
+    schema = {
+        "type": "object",
+        "properties": {
+            "tags": {
+                "anyOf": [
+                    {"items": {"type": "string"}, "type": "array"},
+                    {"type": "null"},
+                ]
+            }
+        },
+    }
+    normalized = normalize_schema(schema)
+
+    expected = {
+        "type": "object",
+        "properties": {
+            "tags": {
+                "anyOf": [
+                    {"items": {"type": "string"}, "type": "array"},
+                    {"type": "null"},
+                ],
+                "description": "Property tags",
+            }
+        },
+        "required": [],
+    }
+
+    assert normalized == expected
+    # Critical: Ensure type was NOT set to "string" - this was the bug
+    assert "type" not in normalized["properties"]["tags"]
+
+
 def test_normalize_tool_spec_with_json_schema():
     tool_spec = {
         "name": "test_tool",

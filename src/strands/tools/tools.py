@@ -88,7 +88,9 @@ def _normalize_property(prop_name: str, prop_def: Any) -> dict[str, Any]:
     if "$ref" in normalized_prop:
         return normalized_prop
 
-    normalized_prop.setdefault("type", "string")
+    # Don't set default type if anyOf, oneOf, or allOf are present as they define types themselves
+    if "anyOf" not in normalized_prop and "oneOf" not in normalized_prop and "allOf" not in normalized_prop:
+        normalized_prop.setdefault("type", "string")
     normalized_prop.setdefault("description", f"Property {prop_name}")
     return normalized_prop
 
