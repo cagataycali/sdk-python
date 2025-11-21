@@ -371,6 +371,7 @@ def test_event_loop_metrics_get_summary(trace, tool, event_loop_metrics, mock_ge
             "totalTokens": 0,
         },
         "average_cycle_time": 0,
+        "context_token_size": 0,
         "tool_usage": {
             "tool1": {
                 "execution_stats": {
@@ -406,6 +407,7 @@ def test_event_loop_metrics_get_summary(trace, tool, event_loop_metrics, mock_ge
             "Event Loop Metrics Summary:\n"
             "├─ Cycles: total=0, avg_time=0.000s, total_time=0.000s\n"
             "├─ Tokens: in=0, out=0, total=0\n"
+            "├─ Context Token Size: 0\n"
             "├─ Bedrock Latency: 0ms\n"
             "├─ Tool Usage:\n"
             "   └─ tool1:\n"
@@ -424,6 +426,7 @@ def test_event_loop_metrics_get_summary(trace, tool, event_loop_metrics, mock_ge
             "Event Loop Metrics Summary:\n"
             "├─ Cycles: total=0, avg_time=0.000s, total_time=0.000s\n"
             "├─ Tokens: in=0, out=0, total=0\n"
+            "├─ Context Token Size: 0\n"
             "├─ Bedrock Latency: 0ms\n"
             "├─ Tool Usage:\n"
             "   └─ tool1:\n"
@@ -476,3 +479,27 @@ def test_use_ProxyMeter_if_no_global_meter_provider():
 
     # Verify it's using a _ProxyMeter
     assert isinstance(metrics_client.meter, _ProxyMeter)
+
+
+def test_event_loop_metrics_update_context_token_size(event_loop_metrics, mock_get_meter_provider):
+    """Test that context token size is updated and recorded correctly"""
+    token_count = 150
+
+    event_loop_metrics.update_context_token_size(token_count)
+
+    tru_context_token_size = event_loop_metrics.context_token_size
+    exp_context_token_size = 150
+
+    assert tru_context_token_size == exp_context_token_size
+    mock_get_meter_provider.return_value.get_meter.assert_called()
+    event_loop_metrics._metrics_client.event_loop_context_token_size.record.assert_called_with(token_count)
+
+
+def test_event_loop_metrics_get_summary_includes_context_token_size(event_loop_metrics, mock_get_meter_provider):
+    """Test that get_summary includes context_token_size"""
+    event_loop_metrics.update_context_token_size(200)
+
+    summary = event_loop_metrics.get_summary()
+
+    assert "context_token_size" in summary
+    assert summary["context_token_size"] == 200

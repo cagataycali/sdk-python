@@ -162,6 +162,7 @@ class EventLoopMetrics:
         traces: List of execution traces.
         accumulated_usage: Accumulated token usage across all model invocations.
         accumulated_metrics: Accumulated performance metrics across all model invocations.
+        context_token_size: Current token size of agent.messages context.
     """
 
     cycle_count: int = 0
@@ -170,6 +171,7 @@ class EventLoopMetrics:
     traces: List[Trace] = field(default_factory=list)
     accumulated_usage: Usage = field(default_factory=lambda: Usage(inputTokens=0, outputTokens=0, totalTokens=0))
     accumulated_metrics: Metrics = field(default_factory=lambda: Metrics(latencyMs=0))
+    context_token_size: int = 0
 
     @property
     def _metrics_client(self) -> "MetricsClient":
@@ -290,12 +292,22 @@ class EventLoopMetrics:
             self._metrics_client.model_time_to_first_token.record(metrics["timeToFirstByteMs"])
         self.accumulated_metrics["latencyMs"] += metrics["latencyMs"]
 
+    def update_context_token_size(self, token_count: int) -> None:
+        """Update the current context token size.
+
+        Args:
+            token_count: The current token count of agent.messages.
+        """
+        self.context_token_size = token_count
+        self._metrics_client.event_loop_context_token_size.record(token_count)
+
     def get_summary(self) -> Dict[str, Any]:
         """Generate a comprehensive summary of all collected metrics.
 
         Returns:
             A dictionary containing summarized metrics data.
-            This includes cycle statistics, tool usage, traces, and accumulated usage information.
+            This includes cycle statistics, tool usage, traces, accumulated usage information,
+            and current context token size.
         """
         summary = {
             "total_cycles": self.cycle_count,
@@ -322,6 +334,7 @@ class EventLoopMetrics:
             "traces": [trace.to_dict() for trace in self.traces],
             "accumulated_usage": self.accumulated_usage,
             "accumulated_metrics": self.accumulated_metrics,
+            "context_token_size": self.context_token_size,
         }
         return summary
 
@@ -357,6 +370,7 @@ def _metrics_summary_to_lines(event_loop_metrics: EventLoopMetrics, allowed_name
         token_parts.append(f"cache_write_input_tokens={summary['accumulated_usage']['cacheWriteInputTokens']}")
 
     yield f"├─ Tokens: {', '.join(token_parts)}"
+    yield f"├─ Context Token Size: {summary['context_token_size']}"
     yield f"├─ Bedrock Latency: {summary['accumulated_metrics']['latencyMs']}ms"
 
     yield "├─ Tool Usage:"
@@ -450,6 +464,7 @@ class MetricsClient:
     event_loop_output_tokens: Histogram
     event_loop_cache_read_input_tokens: Histogram
     event_loop_cache_write_input_tokens: Histogram
+    event_loop_context_token_size: Histogram
     model_time_to_first_token: Histogram
     tool_call_count: Counter
     tool_success_count: Counter
@@ -508,6 +523,9 @@ class MetricsClient:
         )
         self.event_loop_cache_write_input_tokens = self.meter.create_histogram(
             name=constants.STRANDS_EVENT_LOOP_CACHE_WRITE_INPUT_TOKENS, unit="token"
+        )
+        self.event_loop_context_token_size = self.meter.create_histogram(
+            name=constants.STRANDS_EVENT_LOOP_CONTEXT_TOKEN_SIZE, unit="token"
         )
         self.model_time_to_first_token = self.meter.create_histogram(
             name=constants.STRANDS_MODEL_TIME_TO_FIRST_TOKEN, unit="ms"

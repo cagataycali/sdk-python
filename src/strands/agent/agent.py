@@ -651,6 +651,11 @@ class Agent:
 
         finally:
             self.conversation_manager.apply_management(self)
+            # Update context token size after conversation management
+            from ..telemetry.token_estimator import estimate_message_tokens
+
+            context_tokens = estimate_message_tokens(self.messages)
+            self.event_loop_metrics.update_context_token_size(context_tokens)
             await self.hooks.invoke_callbacks_async(AfterInvocationEvent(agent=self))
 
     async def _execute_event_loop_cycle(
@@ -687,6 +692,12 @@ class Agent:
         except ContextWindowOverflowException as e:
             # Try reducing the context size and retrying
             self.conversation_manager.reduce_context(self, e=e)
+
+            # Update context token size after context reduction
+            from ..telemetry.token_estimator import estimate_message_tokens
+
+            context_tokens = estimate_message_tokens(self.messages)
+            self.event_loop_metrics.update_context_token_size(context_tokens)
 
             # Sync agent after reduce_context to keep conversation_manager_state up to date in the session
             if self._session_manager:
@@ -815,6 +826,12 @@ class Agent:
         """Appends a message to the agent's list of messages and invokes the callbacks for the MessageCreatedEvent."""
         self.messages.append(message)
         await self.hooks.invoke_callbacks_async(MessageAddedEvent(agent=self, message=message))
+
+        # Update context token size metric
+        from ..telemetry.token_estimator import estimate_message_tokens
+
+        context_tokens = estimate_message_tokens(self.messages)
+        self.event_loop_metrics.update_context_token_size(context_tokens)
 
     def _redact_user_content(self, content: list[ContentBlock], redact_message: str) -> list[ContentBlock]:
         """Redact user content preserving toolResult blocks.
