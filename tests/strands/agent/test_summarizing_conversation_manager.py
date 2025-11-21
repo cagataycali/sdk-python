@@ -637,3 +637,91 @@ def test_summarizing_conversation_manager_generate_summary_with_tools(mock_regis
     summarizing_manager._generate_summary(messages, agent)
 
     mock_registry.register_tool.assert_not_called()
+
+
+def test_generate_summary_filters_structured_output_tool_use():
+    """Test that structured output toolUse blocks are filtered out from the summary message.
+
+    This test verifies the fix for issue #1160 where structured output tools were causing
+    ValidationException because toolUse blocks were being converted to user messages.
+    """
+    manager = SummarizingConversationManager()
+
+    # Create a mock agent that returns a summary with a toolUse block (simulating structured output)
+    mock_agent = Mock()
+    mock_agent.system_prompt = None
+    mock_agent.messages = []
+    mock_agent.tool_registry = Mock()
+    mock_agent.tool_names = ["some_tool"]
+    mock_agent._default_structured_output_model = Mock()  # Simulate structured output being enabled
+
+    # Mock the agent call to return both text and toolUse (as structured output would)
+    result = Mock()
+    result.message = {
+        "role": "assistant",
+        "content": [
+            {"text": "This is the summary text"},
+            {"toolUse": {"toolUseId": "structured_output_123", "name": "StructuredOutput", "input": {"data": "value"}}},
+        ],
+    }
+    mock_agent.return_value = result
+
+    messages = [
+        {"role": "user", "content": [{"text": "Hello"}]},
+        {"role": "assistant", "content": [{"text": "Hi there"}]},
+    ]
+
+    summary = manager._generate_summary(messages, mock_agent)
+
+    # Verify the summary is a user message (as expected)
+    assert summary["role"] == "user"
+
+    # Verify that toolUse blocks are filtered out
+    assert len(summary["content"]) == 1
+    assert "text" in summary["content"][0]
+    assert summary["content"][0]["text"] == "This is the summary text"
+
+    # Verify no toolUse blocks are present
+    assert not any("toolUse" in content for content in summary["content"])
+
+    # Verify that the agent's structured output model was temporarily disabled during summarization
+    # It should have been restored after, but during summarization it was None
+    assert mock_agent._default_structured_output_model is not None  # Restored after finally block
+
+
+def test_generate_summary_filters_all_tool_use_blocks():
+    """Test that when all content is toolUse blocks, a fallback text message is used."""
+    manager = SummarizingConversationManager()
+
+    # Create a mock agent that returns ONLY toolUse blocks (edge case)
+    mock_agent = Mock()
+    mock_agent.system_prompt = None
+    mock_agent.messages = []
+    mock_agent.tool_registry = Mock()
+    mock_agent.tool_names = ["some_tool"]
+    mock_agent._default_structured_output_model = Mock()
+
+    # Mock the agent call to return only toolUse (no text)
+    result = Mock()
+    result.message = {
+        "role": "assistant",
+        "content": [
+            {"toolUse": {"toolUseId": "structured_output_123", "name": "StructuredOutput", "input": {"data": "value"}}}
+        ],
+    }
+    mock_agent.return_value = result
+
+    messages = [
+        {"role": "user", "content": [{"text": "Hello"}]},
+        {"role": "assistant", "content": [{"text": "Hi there"}]},
+    ]
+
+    summary = manager._generate_summary(messages, mock_agent)
+
+    # Verify the summary is a user message
+    assert summary["role"] == "user"
+
+    # Verify fallback text was used when all content was filtered out
+    assert len(summary["content"]) == 1
+    assert "text" in summary["content"][0]
+    assert summary["content"][0]["text"] == "Summary generated"

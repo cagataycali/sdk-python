@@ -189,10 +189,11 @@ class SummarizingConversationManager(ConversationManager):
         # Choose which agent to use for summarization
         summarization_agent = self.summarization_agent if self.summarization_agent is not None else agent
 
-        # Save original system prompt, messages, and tool registry to restore later
+        # Save original system prompt, messages, tool registry, and structured output model to restore later
         original_system_prompt = summarization_agent.system_prompt
         original_messages = summarization_agent.messages.copy()
         original_tool_registry = summarization_agent.tool_registry
+        original_structured_output_model = getattr(summarization_agent, "_default_structured_output_model", None)
 
         try:
             # Only override system prompt if no agent was provided during initialization
@@ -206,6 +207,10 @@ class SummarizingConversationManager(ConversationManager):
                 # Temporarily set the system prompt for summarization
                 summarization_agent.system_prompt = system_prompt
 
+                # Disable structured output for summarization to avoid toolUse in user messages
+                if hasattr(summarization_agent, "_default_structured_output_model"):
+                    summarization_agent._default_structured_output_model = None
+
             # Add no-op tool if agent has no tools to satisfy tool spec requirement
             if not summarization_agent.tool_names:
                 tool_registry = ToolRegistry()
@@ -216,13 +221,24 @@ class SummarizingConversationManager(ConversationManager):
 
             # Use the agent to generate summary with rich content (can use tools if needed)
             result = summarization_agent("Please summarize this conversation.")
-            return cast(Message, {**result.message, "role": "user"})
+
+            # Filter out any toolUse blocks from the summary message content before converting to user message
+            # This prevents ValidationException when structured output tools are present
+            filtered_content = [content for content in result.message["content"] if "toolUse" not in content]
+
+            # If all content was filtered out (only toolUse blocks), use text fallback
+            if not filtered_content:
+                filtered_content = [{"text": "Summary generated"}]
+
+            return cast(Message, {"role": "user", "content": filtered_content})
 
         finally:
             # Restore original agent state
             summarization_agent.system_prompt = original_system_prompt
             summarization_agent.messages = original_messages
             summarization_agent.tool_registry = original_tool_registry
+            if hasattr(summarization_agent, "_default_structured_output_model"):
+                summarization_agent._default_structured_output_model = original_structured_output_model
 
     def _adjust_split_point_for_tool_pairs(self, messages: List[Message], split_point: int) -> int:
         """Adjust the split point to avoid breaking ToolUse/ToolResult pairs.
