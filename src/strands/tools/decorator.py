@@ -201,9 +201,18 @@ class FunctionToolMetadata:
             if self._is_special_parameter(name):
                 continue
 
-            # Use self.type_hints to get resolved type hints. This handles __future__ annotations correctly.
-            # For Pydantic 2.12+, string annotations from __future__ must be resolved.
-            param_type = self.type_hints.get(name, param.annotation)
+            # Handle PEP 563 (from __future__ import annotations) string annotations.
+            # When __future__.annotations is used, param.annotation returns string literals
+            # which Pydantic 2.12+ cannot resolve. In this case, use self.type_hints which
+            # contains properly resolved types via get_type_hints(..., include_extras=True).
+            # Otherwise, use param.annotation directly as it already contains the actual type
+            # and is more reliable for complex generic types across Python versions.
+            if isinstance(param.annotation, str):
+                # PEP 563 is active - param.annotation is a string, need resolved type
+                param_type = self.type_hints.get(name, param.annotation)
+            else:
+                # Normal case - param.annotation is already the actual type
+                param_type = param.annotation
             if param_type is inspect.Parameter.empty:
                 param_type = Any
             default = ... if param.default is inspect.Parameter.empty else param.default
